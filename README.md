@@ -1,122 +1,80 @@
 # Telegram 文件夹转存机器人
 
-新版 `/start` 为公开文件夹列表：名称、原文件数量、编号按钮和翻页。只有导入完成的文件夹公开展示，普通用户可以浏览；导入、续传、进度和管理仍限 `OWNER_IDS`。原关键词搜索和 resources.db 保留。文件使用带缩略图的 Telegram 原生文档相册，每组最多 10 个，保留原文件名与大小。源机器人的“点击查看下一组”会自动处理，先获取后续消息元数据，媒体仍逐个暂存。
+当前说明对应 **Bridge 0.5.8**。通过专用 Telegram 用户账号读取允许访问的分享，将原文件保存到自己的机器人，再用自己的 `file_id` 提供浏览、取回和收藏。Python 3.11–3.13；依赖以 [requirements.txt](requirements.txt) 为准。
 
-高延迟线路的下载诊断与同文件四路下载设置见 [DOWNLOAD_DIAGNOSTICS.md](DOWNLOAD_DIAGNOSTICS.md)。这次性能升级无需清空任务或重新导入，继续使用 `/resume` 即可。
+## 用户界面
 
-支持上传、下载独立自动调速：发送 `/speed auto 32 32`，从最多 8 路起步，根据实际吞吐逐步试探更高并发，无明显收益则回退；两项数字是上限。原有 `/speed 8 8` 仍为固定并发模式，模式与上限均持久保存。完整说明见 [SPEED.md](SPEED.md)。
+1. `/start` 先发送资源统计，再发送已公开的文件夹名称、文件数量、编号和翻页按钮。`/catalog` 命令已移除，列表底部不显示“我的收藏”。
+2. 点击编号，显示第一张图片和文件夹详情组成的**同一条图片卡片**，下面有“查看内容”“收藏”“我的收藏”“文件夹列表”。封面不存在或暂不可读取时使用文字卡片。
+3. 卡片成功打开后，删除所点击的文件夹列表及它对应的资源统计消息；返回列表仍可继续选择。不会因此清理聊天中的文件、视频或其他内容。
+4. 点击“查看内容”才开始发送详情和文件。连续文档组成文档相册，连续原生视频组成视频相册，每组最多 10 个。同类型的视频不会被前面的文档挤成不必要的单独一页。
+5. 上一组、下一组沿用同一浏览会话，详情只发送一次。全部文件确认发送后显示“✅ 文件夹内容发送完成”和实际消息数；直接跳到最后一组不会误报全部完成。
+6. 收藏按用户分别保存，可在卡片、内容页或 `/favorites` 中访问，支持取消收藏；重启后保留。
 
-新增独立上传连接 `/transport 2`、阶段测速记录 `/diagnostics` 和部署主机 A/B 测试工具。默认仍使用原通道；真实测速有收益后再切换。连接生命周期、备份回退和验收步骤见 [OPERATIONS.md](OPERATIONS.md)。
+资源统计与公开目录使用相同范围，只统计已完成或正在公开核验的文件夹。消息数与文件夹详情采用同一口径：当前独立媒体条目加每个文件夹的一条详情消息，不包含翻页菜单或重复取回流量。图片、视频按来源媒体类型统计，HEIC 等文档附件仍计入文档；文件夹详情中的大小按 Telegram 文件界面的二进制惯例显示 MB/GB。
 
-可选容量路由：2000 MB 以内由官方本地 Bot API 上传，超出继续用用户中转。必须同步迁移收消息入口，并处理未知发送结果；配置和上线步骤见 [HYBRID.md](HYBRID.md)。
+## 权限与命令
 
-实际部署已遇到 32 路触发传输层 HTTP 429；现在默认改为 8 路，仍允许管理员在线调到 32 路，但触发限流会自动降低并发、保存冷却时间、重建连接并继续任务。修复与恢复步骤见 [RATE_LIMITS.md](RATE_LIMITS.md)。
+已完成文件夹向私聊用户公开；管理员仍限 `OWNER_IDS`。原 `resources.db` 搜索、管理员收录和删除功能保留，文件夹名称搜索优先匹配新索引。
 
-已部署用户更新与清空转存索引后重新导入，见 [UPGRADE_CATALOG.md](UPGRADE_CATALOG.md)。清空索引不删除 Telegram 聊天中的旧媒体。
+| 用户 | 命令 | 用途 |
+| --- | --- | --- |
+| 所有私聊用户 | `/start` | 资源统计及文件夹列表 |
+| 所有私聊用户 | `/favorites`、`/help` | 我的收藏、使用帮助 |
+| 所有私聊用户 | `/folder 任务编号 [组号]` | 打开可访问文件夹；指定后续组可直接取回 |
+| 管理员 | `/fetch 分享链接` | **新建导入任务**，也可直接发送允许的分享链接 |
+| 管理员 | `/folders`、`/status 任务编号` | 最近任务、进度与传输阶段 |
+| 管理员 | `/resume 原任务编号` | 续传已有任务，参数不是分享链接 |
+| 管理员 | `/dedup 任务编号` | 核验已有文件夹、合并确认重复的索引 |
+| 管理员 | `/resolve 任务编号 retry` | 确认本地上传未收到后，显式允许重试 |
+| 管理员 | `/speed [auto] 下载并发 上传并发` | 在线调整分块并发 |
+| 管理员 | `/transport 连接数 [round_robin或balanced]`、`/diagnostics` | 中转上传连接、实测记录 |
+| 原搜索管理员 | `/add`、`/delete` | 原资源收录和删除，沿用原程序权限 |
 
-将 `https://t.me/epan?start=...` 分享链接交给自己的机器人，由专用 Telegram 用户账号打开分享、点击获取文件按钮，跟随允许的机器人跳转，将图片、视频和文档保存到自己的机器人。
+## 转存、排序与去重
 
-默认 `TRANSFER_MODE=forward`，只在 Telegram 内转发，不下载媒体。可选择 `TRANSFER_MODE=download_upload`：逐个文件下载到服务器、重新上传、确认自己的机器人收件后立即删除临时文件。服务器长期保留登录会话和 SQLite 文件索引，机器人通过自己的 `file_id` 取回文件。80 GB 服务器的升级步骤见 [TRANSFER.md](TRANSFER.md)。
+先获取分享各批次的消息元数据，自动点击允许的“下一组”按钮，然后按**来源顺序**逐文件转存。0.5.5 起上传也取消视频优先；浏览按持久化的来源位置排序，合并项使用最早出现的位置。已发出的历史聊天消息无法原地重新排序。
 
-下载上传模式可为 HEIC/HEIF、常见图片和视频生成小型 JPEG 缩略图，原文件保持原样。默认 `DISPLAY_MODE=document_group` 显示文件行；旧照片预览模式可用其他 DISPLAY_MODE 值恢复。大文件支持同一文件的分块并发上传；`/status 任务编号` 查看进度和速度，`/resume 任务编号` 继续旧任务。实际提速取决于服务器网络和 Telegram 限速。
+新导入在上传前计算完整文件 SHA-256；视频还尝试读取原始信息、编码流哈希和解码/时间参数。完全相同或确认编码流与参数一致的条目可合并索引，保留优先版本。**不同转码、不同分辨率或码率的版本目前不做相似画面去重**，不能只凭同名、同大小或 GPS 合并。GPS 代表信息完整性，不等于更高画质。见 [DEDUP.md](DEDUP.md)。
 
-## 当前状态
+`complete` 表示已处理来源条目数与来源媒体预期数相符，可能包括重复别名；不等于每个文件都经过人工审核。无法确认完整数量时为 `needs_review`。`/status` 会区分来源条目、独立资源和合并重复数量。
 
-支持 URL 按钮和回调按钮。实际部署已反馈能够读到卡片中的 63 个文件数量，但源聊天禁止转发，forward 模式会返回 ChatForwardsRestrictedError。新下载上传模式仍需真实账号测试；它只能下载账号实际可读取的资源，不保证该分享允许下载，也不保证所有源菜单已兼容。GitHub Actions 检查解析、索引、模拟收件及磁盘清理，不连接真实 Telegram 账号。
+## 两种传输模式与上传通道
 
-卡片上的消息总数可能包含说明文字。例如 64 条消息、2 张图片、46 个视频、15 个文档，媒体预期数量是 63。只有收到数量与卡片媒体数量一致时，任务才标为 `complete`；静默超时且无法核对的任务标为 `needs_review`，已收到的文件仍可取回。`complete` 表示数量核对通过，并不验证每个文件的内容。
+仓库默认 `TRANSFER_MODE=forward`、`UPLOAD_BACKEND=relay`、云端 Bot API；这与已配置服务器的选择可以不同。
 
-## 必需配置
+- `forward`：不下载媒体，受来源转发权限限制。
+- `download_upload`：每次暂存一个原文件，核验、上传并确认入库后清理本地文件。默认原件上限 4 GiB、保留 10 GiB 空闲；[配置工具](configure_transfer.py) 会把任务超时改为 24 小时。见 [TRANSFER.md](TRANSFER.md)。
+- `relay`：专用用户账号上传给自己的机器人，使用回执建立索引。
+- `hybrid`：实际字节数不超过 **2,000,000,000** 的文件走官方本地 Bot API，超出仍走用户中转。必须先完成同一机器人收发入口的整体迁移。会员不会改变这条本地路由边界。见 [HYBRID.md](HYBRID.md)。
 
-- 你现有机器人的 Bot Token。
-- 一个专门用于中转的 Telegram **用户账号**，可以正常访问源分享内容。
-- 从 [my.telegram.org](https://my.telegram.org) 的 API development tools 获取 `API_ID` 和 `API_HASH`。
-- 允许使用的用户 ID：`OWNER_IDS`；中转登录账号的 ID：`RELAY_USER_ID`。
+原文件不转码；已有原生视频保留视频类型，HEIC/图片/视频可生成小型展示图或缩略图。不会另外生成一份转码播放版。小于 2000 MB 的本地 API 上传没有可靠的远端字节进度，只在实际回执确认后计入。
 
-验证码、二次验证密码、Token、API Hash 和 `data/relay.session` 只放在实际部署服务器，不能提交到 GitHub，也不需要发到聊天里。中转账号使用该服务期间不要手动向自己的机器人转发文件，也不要手动操作源机器人，以免把人工消息混入任务。一次只运行一个实例。
+## 安装和接入
 
-## 在你的部署服务器安装
+账号配置放在部署服务器 `.env`，登录会话在 `data/relay.session`。需要 Bot Token、`API_ID`、`API_HASH`、`OWNER_IDS`、`RELAY_USER_ID`，中转账号需能访问来源机器人。不要把真实配置、Token、API Hash、验证码、会话或数据库提交到公开仓库。
 
-以下命令在你准备部署的服务器上执行。本仓库的 GitHub Actions 不部署服务、不保存账号会话。
+- 已有 urllib/getUpdates 的 sougabot：按 [SOUGABOT.md](SOUGABOT.md) 接入，沿用原长轮询。
+- 独立部署或接入 python-telegram-bot：见 [DEPLOY.md](DEPLOY.md)。
+- 已部署日常升级：见 [UPGRADE_CATALOG.md](UPGRADE_CATALOG.md)，无需清空索引、重新登录或覆盖定制的原 `bot.py`。
 
-```bash
-git clone https://github.com/zwthys-cyber/tg-folder-bridge.git
-cd tg-folder-bridge
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-# 编辑 .env，填写实际参数
-python login.py
-# 根据登录输出确认 .env 中的 RELAY_USER_ID
-python main.py
-```
+同一个 Token 只保留一个 getUpdates 消费者。使用专用中转账号、串行任务，不在导入期间手动操作来源机器人，以免回复混入任务。
 
-使用中转账号先在 Telegram 中打开自己的机器人并点击 Start。账号登录只需在部署服务器交互完成一次，后续使用会话文件连接。
+## 运维文档
 
-**已有机器人正在运行时，不能使用同一 Token 再启动本项目的独立 polling 进程。** 请选择将模块接入原程序，或者停止原进程后由本项目接管。后者不会保留原程序功能。本项目不会自动修改你服务器上的现有程序。
+| 文档 | 内容 |
+| --- | --- |
+| [UPGRADE_CATALOG.md](UPGRADE_CATALOG.md) | 当前界面、正常升级、菜单消息清理 |
+| [TRANSFER.md](TRANSFER.md) | 单文件暂存、磁盘清理、恢复语义 |
+| [DEDUP.md](DEDUP.md) | 内容核验、重复别名与原件保留 |
+| [HYBRID.md](HYBRID.md) | 本地 Bot API 迁移、容量路由、未知回执 |
+| [SPEED.md](SPEED.md) | 1–32 路设置、自动探测最多 16 路 |
+| [DOWNLOAD_DIAGNOSTICS.md](DOWNLOAD_DIAGNOSTICS.md) | 阶段速度、分块等待、完整覆盖检查 |
+| [RATE_LIMITS.md](RATE_LIMITS.md) | 分方向退避与持久冷却 |
+| [OPERATIONS.md](OPERATIONS.md) | 备份、上线验收、回退和对照测试 |
 
-## 接入已有 Python 机器人
+## 检查与边界
 
-**如果现有程序是 sougabot，使用 urllib/getUpdates：请按 [SOUGABOT.md](SOUGABOT.md) 接入。** 该适配器将原程序收到的更新字典交给模块，不会另启长轮询，也不会修改原 resources.db。
+[GitHub Actions](https://github.com/zwthys-cyber/tg-folder-bridge/actions/workflows/check.yml) 在 Python 3.11、3.12、3.13 上执行编译检查和测试，再打包 Git 跟踪的源码；不需要真实账号、不部署服务，不包含生产媒体或密钥。0.5.8 的检查包括 151 项测试；真实来源菜单、网络吞吐和客户端布局仍需部署端验收。
 
-目前提供 `python-telegram-bot 22.x` 的模块接入方式。`bridge.install(app)` 添加 `/fetch`、`/folder` 和中转文件接收处理器，使用处理组 `-100`，并阻止这些消息进入其他处理器。
-
-```python
-import os
-from dotenv import load_dotenv
-from telegram.ext import Application
-from bridge import Bridge
-
-load_dotenv()
-os.umask(0o077)
-bridge = Bridge()
-
-async def startup(app):
-    # 原程序的启动逻辑放在这里
-    await bridge.start(app)
-
-async def shutdown(app):
-    await bridge.stop(app)
-    # 原程序的停止逻辑放在这里
-
-app = (Application.builder().token(os.environ['BOT_TOKEN'])
-       .post_init(startup).post_stop(shutdown).build())
-bridge.install(app)
-# 添加原程序其他处理器
-app.run_polling(drop_pending_updates=False)
-```
-
-若原程序使用自定义 webhook 生命周期，需在初始化之后手动 `await bridge.start(app)`，停止时 `await bridge.stop(app)`。保持顺序处理更新；不要启用并发更新。其他语言/框架需要按同样流程移植，当前未提供通用 HTTP 接口。
-
-## 使用
-
-在与自己机器人的私聊中发送：
-
-```text
-/fetch https://t.me/epan?start=分享参数
-```
-
-也可直接发送链接。机器人返回任务编号。查询任务并取回第一页：
-
-```text
-/folder 任务编号
-```
-
-每页发送 10 个文件；第二页使用 `/folder 任务编号 2`。只允许任务提交者取回自己的文件。程序先将文件转发到中转用户与自己机器人的私聊，再由机器人保存索引，用自己的 `file_id` 发给请求者。收件确认失败会停止后续导入，避免延迟消息混入新任务。
-
-发送 `/folders` 可查看自己最近 20 个任务。具体安装方式、systemd 服务配置及首次联调步骤见 [DEPLOY.md](DEPLOY.md)。每次 GitHub 检查通过后，Actions 会提供 `tg-folder-bridge` 下载包，内含源码 ZIP 和 SHA-256 校验文件。
-
-## 限制与恢复
-
-- 文件存储在 Telegram 中，服务器上的索引需要备份；删除索引会失去按任务检索能力。`/folder` 使用自己机器人的 `file_id` 重新发送，即使中转聊天收件消息已删除也不依赖原消息；不保证文件在 Telegram 中永久可用。caption 保留为普通文本，原格式实体不保留。
-- 默认只跟随 `epan`、`SPXM111_bot`，实际按钮指向其他机器人时需在 `.env` 的 `ALLOWED_SOURCE_BOTS` 增加目标。只自动点击 `BUTTON_LABELS` 匹配的获取/下载/翻页按钮，最多执行 100 次操作。
-- 需要加入频道、密码、付费或其他交互时，任务可能结束为 `needs_review`。程序不自动处理这些步骤。
-- forward 模式遇到禁止转发会失败。显式开启 download_upload 后，会尝试下载账号可访问的媒体再上传，不能恢复已删除、不可访问或下载被拒绝的文件。图片相册逐条转存，原相册分组和嵌套目录层级暂不保留；一个分享对应一个文件夹索引。
-- 服务不读取源机器人历史文件，不保证断线期间消息补齐。重启将未完成任务标为 `interrupted`；需确认源发送已停止后重新提交，重新导入会产生新任务。
-- 默认 45 秒无新消息结束收集，整个任务最多一小时；可用 `IDLE_SECONDS`、`JOB_TIMEOUT_SECONDS` 调整。服务无通用的源请求关联标识，使用专用中转账号、串行任务和独占源聊天；特别慢的上一任务回复仍可能影响后一任务，需要根据实际发送方式联调。
-- Telegram 对同一机器人收到的文件提供自己的 `file_id`，不能直接复用对方机器人的 `file_id`。参考 [Telegram 文件说明](https://core.telegram.org/bots/api#file)、[Telethon 转发接口](https://docs.telethon.dev/en/stable/modules/client.html#telethon.client.messages.MessageMethods.forward_messages)。
-
-## GitHub 检查
-
-推送自动触发 Python 3.11、3.12、3.13 检查。不需要任何 GitHub Secrets，不使用真实 Telegram 账号。真实登录和端到端验证需要在最终部署环境完成。
+任务默认空闲等待为 45 秒、原始 `.env.example` 总超时为 3600 秒；下载上传配置工具改为 86400 秒。重启默认恢复先前正在运行/排队/冷却的下载上传任务，未知本地发送结果除外。来源已删除、权限变更、付费或其他交互可能阻止完成；最终以 `/status` 和实际回执为准。

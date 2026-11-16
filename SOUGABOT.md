@@ -1,68 +1,38 @@
-# 接入另一台服务器的 sougabot
+# 接入已有 sougabot（0.5.8）
 
-目标配置：Python 3.13、标准库 urllib 调用 Bot API、长轮询 getUpdates、systemd 服务 sougabot、项目目录 `/root/sougabot`，原数据库 `/root/sougabot/resources.db`。
+目标为 Python 3.13、urllib 调用 Bot API、唯一的 getUpdates 长轮询、systemd 服务 `sougabot`。示例路径为 `/root/sougabot` 和 `/root/tg-folder-bridge`；现有搜索数据库保持在 `/root/sougabot/resources.db`。
 
-如果已经完成接入，现在需要开启逐文件临时下载、上传后删除：直接按 [TRANSFER.md](TRANSFER.md) 更新转存模块和配置即可，无需再次覆盖 `/root/sougabot/bot.py`。
+## 已接入的服务器
 
-已根据提供的完整 `bot.py` 制作 [接入版 bot.py](integrations/sougabot_bot.py)。保留原搜索、搜索分页、管理员绑定、添加和删除功能，并在原更新循环中先分发转存消息，两个分支都会推进 offset。转存索引仍独立于原 resources.db；导入文件通过 `/folders`、`/folder` 查看，不自动混入原关键词搜索。
+正常更新只拉取桥接项目，不再把参考 [integrations/sougabot_bot.py](integrations/sougabot_bot.py) 整体覆盖到定制的 `/root/sougabot/bot.py`。备份、升级和恢复步骤见 [UPGRADE_CATALOG.md](UPGRADE_CATALOG.md)。下载上传和 hybrid 参数见 [TRANSFER.md](TRANSFER.md)、[HYBRID.md](HYBRID.md)。
 
-## 已登录中转账号：安装接入版
+适配器处理 `/start`、`/favorites`、`/help`、文件夹浏览和管理命令，`/catalog` 命令已删除。先搜索文件夹名称，未命中再走原 `resources.db` 搜索。公开取回、收藏、视频相册、浏览进度与菜单清理均使用独立的 `data/index.sqlite3`，不写入原资源表。
 
-在实际运行 sougabot 的服务器执行以下命令。假定此前已经配置好 `.env` 并完成 `login.py` 登录：
+## 首次准备
 
-```bash
-git -C /root/tg-folder-bridge pull --ff-only
-/root/sougabot/.venv/bin/pip install -r /root/tg-folder-bridge/requirements.txt
-systemctl stop sougabot
-backup_dir="/root/sougabot/backup-$(date +%Y%m%d-%H%M%S)"
-install -d -m 700 "$backup_dir"
-cp -p /root/sougabot/bot.py /root/sougabot/resources.db "$backup_dir/"
-cp /root/tg-folder-bridge/integrations/sougabot_bot.py /root/sougabot/bot.py
-systemctl start sougabot
-journalctl -u sougabot -n 50 --no-pager
-```
-
-备份失败时先解决错误，不继续覆盖文件。原 `.bot-token`、`.admin-id` 和 `resources.db` 保持原位置，不要删除，也不需要把 Token 写进接入代码。成功启动应看到 `文件转存模块已连接，沿用原 getUpdates 接收消息。`。
-
-随后在 Telegram 中先用 `/help` 检查连接，再发送一个小文件夹分享链接。使用 `/folders` 查看任务，用 `/folder 任务编号` 取回文件。首次真实账号转存仍需联调，GitHub 检查不代表已经访问过源分享。
-
-若转存模块因配置或登录问题启动失败，原搜索功能仍继续运行，日志会显示错误类型。处理配置后 `systemctl restart sougabot` 可重试。需要回滚时，停止服务，将上面备份目录中的 `bot.py` 复制回原位置，再启动服务；无需回滚独立的转存索引。
-
-以下各节记录模块接入原理和手工接入方法，采用完整接入版时无需再手工修改原代码。
-
-## 工作方式
-
-`souga_adapter.SougaBridge` 在原 sougabot 进程中运行后台线程，线程内处理 Telegram 用户会话和转存任务。原程序继续使用 urllib/getUpdates 接收消息，把相关更新字典传给 `handle_update()`。
-
-模块内部使用 python-telegram-bot 处理字典和发送消息，但明确使用 `updater(None)`，不启动 polling，不调用 getUpdates、不变更 webhook。原程序仍是唯一的消息接收者。不要启动本仓库的 main.py 或额外的 tg-folder-bridge systemd 服务。
-
-## 在实际部署服务器准备文件
-
-以下命令在运行 sougabot 的另一台服务器执行。当前工作服务器与 GitHub Actions 都不执行登录或服务启动。
+在真正部署服务器执行：
 
 ```bash
 git clone https://github.com/zwthys-cyber/tg-folder-bridge.git /root/tg-folder-bridge
 /root/sougabot/.venv/bin/pip install -r /root/tg-folder-bridge/requirements.txt
 cp /root/tg-folder-bridge/.env.example /root/tg-folder-bridge/.env
+chmod 600 /root/tg-folder-bridge/.env
 ```
 
-编辑 `/root/tg-folder-bridge/.env`，填写 API_ID、API_HASH、OWNER_IDS、RELAY_USER_ID，明确设置 `DATA_DIR=/root/tg-folder-bridge/data`。适配器直接使用原程序传入的 Bot Token，不从这里读取 BOT_TOKEN。
-
-在部署服务器中登录用户账号：
+填写 API_ID、API_HASH、OWNER_IDS、RELAY_USER_ID，使用绝对的 DATA_DIR。此接入方式由原程序传入 Token，桥接 `.env` 不需要复制真实 BOT_TOKEN。已有 `.env` 时不要再用示例覆盖。
 
 ```bash
 cd /root/tg-folder-bridge
 /root/sougabot/.venv/bin/python login.py
-chmod 600 .env
 ```
 
-用登录输出核对 RELAY_USER_ID，并用该账号在 Telegram 中打开自己的机器人点击 Start。
+只在交互终端输入验证码/二次验证密码，按输出核对 RELAY_USER_ID。用中转用户账号打开自己的机器人点击开始。
 
-## 修改原 bot.py 的三个位置
+## 在原程序接入
 
-先备份原代码。以下的 `BOT_TOKEN`、`updates`、`existing_handle_update` 是说明用变量，需换成原程序的实际名称。不要将整个示例覆盖到原 bot.py。
+先停止服务并备份原 `bot.py`、资源库、真实配置和转存索引。参考接入版保留原收录、搜索、搜索分页和管理员绑定；若原代码已有定制，逐处合并，不整体覆盖。
 
-导入并初始化一次，在原长轮询循环开始之前：
+初始化桥接一次：
 
 ```python
 import sys
@@ -70,43 +40,36 @@ sys.path.insert(0, '/root/tg-folder-bridge')
 from souga_adapter import SougaBridge
 
 folder_bridge = SougaBridge(
-    bot_token=BOT_TOKEN,  # 原程序已读取的真实 token 变量
+    bot_token=TOKEN,
     env_file='/root/tg-folder-bridge/.env',
 ).start()
 ```
 
-在原程序收到每一个原始 update 字典后、进入原业务处理之前：
+原 getUpdates 循环收到更新后优先派发，并让所有分支都推进同一 offset：
 
 ```python
 for update in updates:
-    # 沿用原程序对 update_id/offset 的持久化策略。
-    if folder_bridge.handle_update(update):
-        # 即使跳过原业务处理，也必须正常推进该 update 的 offset。
-        # 此处使用原程序的 offset 更新代码，然后继续下一条。
-        continue
-    existing_handle_update(update)  # 原有处理逻辑
+    try:
+        if folder_bridge is None or not folder_bridge.handle_update(update):
+            handle(update)
+    finally:
+        offset = update['update_id'] + 1
 ```
 
-**offset 是接入时必须核对的位置。** 如果原程序在业务处理之后才推进 offset，不能直接复制上面的 continue：应将 offset 推进放入每条更新处理共同执行的位置，确保桥接和原业务两个分支都能执行。不要另写一套 getUpdates。
+程序退出时调用 `folder_bridge.close()`。顺序调用 `handle_update()`，不要另起 polling 或同时运行 `main.py`。适配器使用 `updater(None)`；线程内只处理消息、用户会话和转存，不接管 getUpdates。
 
-在原程序正常退出的 finally/停止清理中：
+## 本地 API 入口必须一致
 
-```python
-folder_bridge.close()
-```
+使用 hybrid 时，原 urllib 的 getMe/getUpdates/搜索发送与桥接的所有 Bot API 调用必须使用同一个 `BOT_API_BASE`。在第一次 getMe 之前加载桥接 `.env` 并调用 `bot_api_config.endpoint()`；参考接入版已实现此顺序。现有定制程序按相同方式修改 URL，不能只修改桥接的发送地址。云端迁移到本地的专门步骤见 [HYBRID.md](HYBRID.md)，已迁移服务器不要重复 logOut。
 
-保持顺序调用 handle_update，不要并发派发；该调用会等待相关处理完成，取回一页文件时可能需要十几秒。若原程序有统一的默认回复，桥接返回 True 后不要再进入默认回复。
-
-## 重启与测试
-
-完成对照修改后，在实际部署服务器执行：
+## 启动和验收
 
 ```bash
-systemctl restart sougabot
+systemctl start sougabot
 systemctl status sougabot --no-pager -l
 journalctl -u sougabot -n 50 --no-pager
 ```
 
-先确认原功能仍可用，再私聊自己的机器人发送一个小的分享链接，之后用 `/folders` 和 `/folder 任务编号` 查看和取回。实际跳转、接收数量、源机器人的其他交互仍需真实账号联调。
+应看到 Bridge 版本、传输模式和“沿用原 getUpdates 接收消息”。验证 `/start` 的统计和列表、目录卡片、翻组、收藏，以及原 `/add`、搜索、`/delete`。管理员用一个小分享测试 `/fetch`、`/status`、`/folder`；已有任务续传用 `/resume 任务编号`，不是分享链接。
 
-若要提供 bot.py 用于生成精确补丁，请先移除 Token、API Hash、账号会话和其他密钥。若还需要导入原资源搜索，另外提供相关建表语句和查询/保存函数，无需发送真实数据库和文件内容。
+配置或登录失败时，参考接入版保留原搜索并记录错误类型；这不代表转存已连接。回退时保留原 Bot API 入口，按 [OPERATIONS.md](OPERATIONS.md) 的数据库兼容说明处理。
