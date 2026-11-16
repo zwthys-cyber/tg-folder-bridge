@@ -4,3 +4,6 @@ data/
 *.session*
 __pycache__/
 *.pyc
+.bot-token
+.admin-id
+resources.db*

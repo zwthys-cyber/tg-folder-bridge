@@ -2,7 +2,31 @@
 
 目标配置：Python 3.13、标准库 urllib 调用 Bot API、长轮询 getUpdates、systemd 服务 sougabot、项目目录 `/root/sougabot`，原数据库 `/root/sougabot/resources.db`。
 
-本页给出接入模板。未取得现有 `bot.py` 和数据库结构，因此不是对原程序的精确补丁。转存索引保存在独立 SQLite 文件中，不向原 resources.db 写入数据；如需原搜索功能也能搜到导入文件，需要另行适配原数据库结构。
+已根据提供的完整 `bot.py` 制作 [接入版 bot.py](integrations/sougabot_bot.py)。保留原搜索、搜索分页、管理员绑定、添加和删除功能，并在原更新循环中先分发转存消息，两个分支都会推进 offset。转存索引仍独立于原 resources.db；导入文件通过 `/folders`、`/folder` 查看，不自动混入原关键词搜索。
+
+## 已登录中转账号：安装接入版
+
+在实际运行 sougabot 的服务器执行以下命令。假定此前已经配置好 `.env` 并完成 `login.py` 登录：
+
+```bash
+git -C /root/tg-folder-bridge pull --ff-only
+/root/sougabot/.venv/bin/pip install -r /root/tg-folder-bridge/requirements.txt
+systemctl stop sougabot
+backup_dir="/root/sougabot/backup-$(date +%Y%m%d-%H%M%S)"
+install -d -m 700 "$backup_dir"
+cp -p /root/sougabot/bot.py /root/sougabot/resources.db "$backup_dir/"
+cp /root/tg-folder-bridge/integrations/sougabot_bot.py /root/sougabot/bot.py
+systemctl start sougabot
+journalctl -u sougabot -n 50 --no-pager
+```
+
+备份失败时先解决错误，不继续覆盖文件。原 `.bot-token`、`.admin-id` 和 `resources.db` 保持原位置，不要删除，也不需要把 Token 写进接入代码。成功启动应看到 `文件转存模块已连接，沿用原 getUpdates 接收消息。`。
+
+随后在 Telegram 中先用 `/help` 检查连接，再发送一个小文件夹分享链接。使用 `/folders` 查看任务，用 `/folder 任务编号` 取回文件。首次真实账号转存仍需联调，GitHub 检查不代表已经访问过源分享。
+
+若转存模块因配置或登录问题启动失败，原搜索功能仍继续运行，日志会显示错误类型。处理配置后 `systemctl restart sougabot` 可重试。需要回滚时，停止服务，将上面备份目录中的 `bot.py` 复制回原位置，再启动服务；无需回滚独立的转存索引。
+
+以下各节记录模块接入原理和手工接入方法，采用完整接入版时无需再手工修改原代码。
 
 ## 工作方式
 
