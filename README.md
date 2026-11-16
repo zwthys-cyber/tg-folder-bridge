@@ -42,6 +42,8 @@ python main.py
 
 ## 接入已有 Python 机器人
 
+**如果现有程序是 sougabot，使用 urllib/getUpdates：请按 [SOUGABOT.md](SOUGABOT.md) 接入。** 该适配器将原程序收到的更新字典交给模块，不会另启长轮询，也不会修改原 resources.db。
+
 目前提供 `python-telegram-bot 22.x` 的模块接入方式。`bridge.install(app)` 添加 `/fetch`、`/folder` 和中转文件接收处理器，使用处理组 `-100`，并阻止这些消息进入其他处理器。
 
 ```python
