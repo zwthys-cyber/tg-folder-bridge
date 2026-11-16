@@ -34,7 +34,6 @@ async def send_file_page(bot, chat, job, items, page, send_one):
     pages = max(1, (len(items) + 9) // 10)
     page = max(1, min(page, pages))
     title = job.get('title') or ('文件夹 ' + job['id'][:8])
-    await bot.send_message(chat, f'📁 {title}\n共 {len(items)} 个文件（第 {page}/{pages} 组）')
     selected = items[(page-1)*10:page*10]
     documents = []
 
@@ -60,4 +59,5 @@ async def send_file_page(bot, chat, job, items, page, send_one):
     if page < pages:
         nav.append(InlineKeyboardButton('下一组 ➡️', callback_data=f"bridge_open:{job['id']}:{page+1}"))
     keyboard = ([nav] if nav else []) + [[InlineKeyboardButton('📁 返回文件夹列表', callback_data='bridge_catalog:1')]]
-    await bot.send_message(chat, '选择下一组文件或返回列表。', reply_markup=InlineKeyboardMarkup(keyboard))
+    await bot.send_message(chat, f'📁 {title}\n共 {len(items)} 个文件（第 {page}/{pages} 组）',
+                           reply_markup=InlineKeyboardMarkup(keyboard))
