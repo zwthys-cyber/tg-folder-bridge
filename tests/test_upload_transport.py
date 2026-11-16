@@ -52,7 +52,7 @@ class Transport(unittest.IsolatedAsyncioTestCase):
         self.sender_patch.stop()
 
     async def test_real_sdk_calls_use_distinct_sessions_same_key_and_media_endpoint(self):
-        pool = UploadTransport(self.client, 2)
+        pool = UploadTransport(self.client, 2, 'round_robin')
         await pool.prepare()
         before = list(pool.senders)
         await pool.prepare()
