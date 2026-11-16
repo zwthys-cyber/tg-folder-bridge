@@ -1108,3 +1108,7 @@ class Bridge:
                     continue
                 await self.transfer_media(message, key, job)
             await asyncio.sleep(self.transfer_pause)
+        if job.get('dedup_audit') and any(not row.get('content_sha256') for row in self.store.files(job['id'])):
+            # Existing saved rows do not prove this audit actually inspected
+            # all originals when a source batch stops arriving prematurely.
+            job['audit_unmatched'] = True
