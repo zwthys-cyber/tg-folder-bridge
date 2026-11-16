@@ -31,6 +31,8 @@ class Routing(unittest.TestCase):
         query = {'callback_query': {'data': 'bridge_original:job:1:2',
                                     'message': {'chat': {'type': 'private'}}}}
         self.assertTrue(is_bridge_update(query, 7))
+        query['callback_query']['data'] = 'bridge_view:job:1'
+        self.assertTrue(is_bridge_update(query, 7))
         query['callback_query']['data'] = 'searchkey:5'
         self.assertFalse(is_bridge_update(query, 7))
 

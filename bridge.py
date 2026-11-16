@@ -16,7 +16,8 @@ from core import Store, folder_title, folder_metadata, source_entry, media_count
 from media_spool import MediaSpool
 from previews import document_thumbnail, make_jpeg_preview
 from fast_upload import upload_file
-from catalog_ui import catalog_page, send_file_page
+from catalog_ui import catalog_page, send_file_page, send_folder_card
+from folder_cover import image_cover
 import transfer_settings
 from transport_recovery import Cooldown, error_detail, rate_wait
 from adaptive_speed import AdaptiveSpeed
@@ -25,7 +26,7 @@ from bot_api_config import endpoint, LOCAL
 from local_upload import eligible, send_local, DeliveryUnknownError
 from content_identity import analyze, preference
 
-VERSION = '0.5.1'
+VERSION = '0.5.2'
 
 
 class Bridge:
@@ -110,7 +111,7 @@ class Bridge:
         app.add_handler(CommandHandler('resolve', self.resolve_delivery), group=-100)
         app.add_handler(CommandHandler('dedup', self.dedup), group=-100)
         app.add_handler(CallbackQueryHandler(self.original, pattern=r'^bridge_original:'), group=-100)
-        app.add_handler(CallbackQueryHandler(self.catalog_callback, pattern=r'^bridge_(catalog|open|search):'), group=-100)
+        app.add_handler(CallbackQueryHandler(self.catalog_callback, pattern=r'^bridge_(catalog|open|view|search):'), group=-100)
         app.add_handler(MessageHandler(filters.Regex(r'^https://t\.me/\w+\?start='),
                                        self.fetch), group=-100)
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.search_command), group=-100)
@@ -259,7 +260,10 @@ class Bridge:
                 page = int(parts[1])
                 await query.answer()
                 text, markup = catalog_page(self.store.catalog(), page)
-                await query.edit_message_text(text, reply_markup=markup)
+                if getattr(query.message, 'photo', None):
+                    await context.bot.send_message(update.effective_chat.id, text, reply_markup=markup)
+                else:
+                    await query.edit_message_text(text, reply_markup=markup)
             elif parts[0] == 'bridge_search':
                 session = self.search_sessions.get(parts[1])
                 if not session or session[0] != update.effective_user.id:
@@ -276,11 +280,26 @@ class Bridge:
                     raise ApplicationHandlerStop
                 page = max(1, int(parts[2]))
                 await query.answer()
-                await send_file_page(context.bot, update.effective_chat.id, job,
-                                     self.store.files(job['id']), page, self.send_stored)
+                items = self.store.files(job['id'])
+                if parts[0] == 'bridge_open' and page == 1:
+                    await self.show_folder_card(context.bot, update.effective_chat.id, job, items)
+                else:
+                    await send_file_page(context.bot, update.effective_chat.id, job,
+                                         items, page, self.send_stored)
         except (ValueError, IndexError):
             await query.answer('列表已更新，请重新发送 /start', show_alert=True)
         raise ApplicationHandlerStop
+
+    async def show_folder_card(self, bot, chat, job, items):
+        photo = job.get('cover_file_id')
+        if not photo:
+            try:
+                photo = await image_cover(bot, items)
+            except Exception as exc:
+                print('文件夹封面暂不可用：' + type(exc).__name__, flush=True)
+        reply = await send_folder_card(bot, chat, job, items, photo)
+        if photo and getattr(reply, 'photo', None):
+            self.store.set_cover(job['id'], reply.photo[-1].file_id)
 
     async def stop(self, app):
         if self.recovery_worker:
@@ -338,7 +357,10 @@ class Bridge:
             raise ApplicationHandlerStop
         files = self.store.files(job['id'])
         if self.document_groups:
-            await send_file_page(context.bot, update.effective_chat.id, job, files, page, self.send_stored)
+            if page == 1:
+                await self.show_folder_card(context.bot, update.effective_chat.id, job, files)
+            else:
+                await send_file_page(context.bot, update.effective_chat.id, job, files, page, self.send_stored)
             raise ApplicationHandlerStop
         await update.message.reply_text(
             f"任务：{job['id']}\n状态：{job['state']}\n"

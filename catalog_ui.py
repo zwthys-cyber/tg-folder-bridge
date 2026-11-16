@@ -30,7 +30,7 @@ def catalog_page(rows, page=1, page_callback_prefix='bridge_catalog'):
     return '\n\n'.join(body), InlineKeyboardMarkup(buttons)
 
 
-def folder_details(job, items):
+def folder_details(job, items, starting=True):
     title = job.get('title') or ('文件夹 ' + job['id'][:8])
     counts = dict(photo=0, video=0, document=0)
     for item in items:
@@ -54,7 +54,18 @@ def folder_details(job, items):
             f'　• 总大小：{total}\n\n'
             f'📅 创建时间：{job.get("source_created_at") or "未知"}\n'
             f'✏️ 最后更新：{job.get("source_updated_at") or "未知"}\n\n'
-            '⏳ 开始发送内容...')
+            + ('⏳ 开始发送内容...' if starting else '👇 点击下方按钮查看内容'))
+
+
+async def send_folder_card(bot, chat, job, items, photo=None):
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton('查看内容', callback_data=f"bridge_view:{job['id']}:1")],
+        [InlineKeyboardButton('文件夹列表', callback_data='bridge_catalog:1')]])
+    text = folder_details(job, items, starting=False)
+    if photo:
+        return await bot.send_photo(chat_id=chat, photo=photo, caption=text,
+                                    parse_mode=None, reply_markup=keyboard)
+    return await bot.send_message(chat_id=chat, text=text, parse_mode=None, reply_markup=keyboard)
 
 
 async def send_file_page(bot, chat, job, items, page, send_one):
@@ -83,9 +94,9 @@ async def send_file_page(bot, chat, job, items, page, send_one):
     await flush()
     nav = []
     if page > 1:
-        nav.append(InlineKeyboardButton('⬅️ 上一组', callback_data=f"bridge_open:{job['id']}:{page-1}"))
+        nav.append(InlineKeyboardButton('⬅️ 上一组', callback_data=f"bridge_view:{job['id']}:{page-1}"))
     if page < pages:
-        nav.append(InlineKeyboardButton('下一组 ➡️', callback_data=f"bridge_open:{job['id']}:{page+1}"))
+        nav.append(InlineKeyboardButton('下一组 ➡️', callback_data=f"bridge_view:{job['id']}:{page+1}"))
     keyboard = ([nav] if nav else []) + [[InlineKeyboardButton('📁 返回文件夹列表', callback_data='bridge_catalog:1')]]
     await bot.send_message(chat, f'📁 {title}\n共 {len(items)} 个文件（第 {page}/{pages} 组）',
                            reply_markup=InlineKeyboardMarkup(keyboard))

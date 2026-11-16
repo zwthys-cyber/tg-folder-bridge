@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, Mock
-from catalog_ui import catalog_page, send_file_page, folder_details
+from catalog_ui import catalog_page, send_file_page, folder_details, send_folder_card
 
 
 class Catalog(unittest.IsolatedAsyncioTestCase):
@@ -30,7 +30,7 @@ class Catalog(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(group[0].type, 'document')
         send_one.assert_not_awaited()
         keyboard = bot.send_message.call_args.kwargs['reply_markup']
-        self.assertEqual(keyboard.inline_keyboard[0][0].callback_data, 'bridge_open:job:2')
+        self.assertEqual(keyboard.inline_keyboard[0][0].callback_data, 'bridge_view:job:2')
         self.assertEqual([call[0] for call in sequence.mock_calls], ['text', 'album', 'text'])
         self.assertIn('📖 内容统计：', bot.send_message.call_args_list[0].args[1])
         self.assertIn('第 1/2 组', bot.send_message.call_args_list[-1].args[1])
@@ -46,6 +46,20 @@ class Catalog(unittest.IsolatedAsyncioTestCase):
                          '最后更新：2026-11-17 00:36', '⏳ 开始发送内容...'):
             self.assertIn(expected, text)
         self.assertIn('总大小：未知', folder_details(dict(id='job'), [dict(kind='document')]))
+
+    async def test_cover_and_details_are_one_message_with_explicit_content_button(self):
+        bot = NS(send_photo=AsyncMock(), send_message=AsyncMock(), send_media_group=AsyncMock())
+        await send_folder_card(bot, 7, dict(id='job',title='示例'), [dict(kind='photo',file_size=10)], 'photo-id')
+        bot.send_photo.assert_awaited_once()
+        bot.send_message.assert_not_awaited()
+        bot.send_media_group.assert_not_awaited()
+        args = bot.send_photo.call_args.kwargs
+        self.assertEqual(args['photo'], 'photo-id')
+        self.assertIn('📖 内容统计：', args['caption'])
+        self.assertNotIn('开始发送内容', args['caption'])
+        buttons = args['reply_markup'].inline_keyboard
+        self.assertEqual(buttons[0][0].callback_data, 'bridge_view:job:1')
+        self.assertEqual(buttons[1][0].callback_data, 'bridge_catalog:1')
 
     async def test_single_remaining_file_does_not_use_invalid_one_item_album(self):
         bot = NS(send_message=AsyncMock(), send_media_group=AsyncMock())

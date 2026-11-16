@@ -72,6 +72,27 @@ class Parsing(unittest.TestCase):
 
 
 class CloudTransfer(unittest.IsolatedAsyncioTestCase):
+    async def test_open_shows_card_view_sends_files_and_photo_back_returns_catalog(self):
+        self.bridge.store.update('job','complete',0)
+        query=NS(data='bridge_open:job:1',answer=AsyncMock(),message=NS(photo=None),edit_message_text=AsyncMock())
+        update=NS(callback_query=query,effective_chat=NS(type='private',id=7),effective_user=NS(id=7))
+        bot=NS(send_message=AsyncMock())
+        self.bridge.show_folder_card=AsyncMock()
+        with patch('bridge.send_file_page',new_callable=AsyncMock) as send_page:
+            with self.assertRaises(ApplicationHandlerStop):
+                await self.bridge.catalog_callback(update,NS(bot=bot))
+            self.bridge.show_folder_card.assert_awaited_once()
+            send_page.assert_not_awaited()
+            query.data='bridge_view:job:1'
+            with self.assertRaises(ApplicationHandlerStop):
+                await self.bridge.catalog_callback(update,NS(bot=bot))
+            send_page.assert_awaited_once()
+            query.data='bridge_catalog:1';query.message.photo=[NS(file_id='cover')]
+            with self.assertRaises(ApplicationHandlerStop):
+                await self.bridge.catalog_callback(update,NS(bot=bot))
+            bot.send_message.assert_awaited_once()
+            query.edit_message_text.assert_not_awaited()
+
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.env = patch.dict(os.environ, {

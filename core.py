@@ -118,7 +118,7 @@ class Store:
         for column in ('audit_requested', 'audit_public'):
             if column not in job_columns:
                 self.db.execute(f'ALTER TABLE jobs ADD COLUMN {column} INTEGER DEFAULT 0')
-        for column in ('source_created_at', 'source_updated_at'):
+        for column in ('source_created_at', 'source_updated_at', 'cover_file_id'):
             if column not in job_columns:
                 self.db.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT DEFAULT ''")
         self.db.execute("UPDATE jobs SET restart_pending=1 WHERE state IN ('running','queued','cooldown')")
@@ -218,6 +218,10 @@ class Store:
                 self.db.execute(f'UPDATE jobs SET {field}=? WHERE id=?', (metadata[field], job))
         if metadata:
             self.db.commit()
+
+    def set_cover(self, job, file_id):
+        self.db.execute('UPDATE jobs SET cover_file_id=? WHERE id=?', (file_id, job))
+        self.db.commit()
 
     def processed_count(self, job):
         return len(self.files(job)) + self.db.execute('SELECT count(*) FROM file_aliases WHERE job=?', (job,)).fetchone()[0]
