@@ -18,12 +18,12 @@ def raw_message(text='', user=7, **media):
 
 class Routing(unittest.TestCase):
     def test_commands_and_share_link_are_routed(self):
-        for text in ('/start', '/catalog', '/favorites', '/help', '/speed 32 32', '/transport 2', '/diagnostics', '/fetch https://t.me/epan?start=x', '/folders', '/folder id 2', '/status id', '/resume id',
+        for text in ('/start', '/favorites', '/help', '/speed 32 32', '/transport 2', '/diagnostics', '/fetch https://t.me/epan?start=x', '/folders', '/folder id 2', '/status id', '/resume id',
                      'https://t.me/epan?start=x'):
             self.assertTrue(is_bridge_update(raw_message(text), 7))
 
     def test_existing_bot_messages_remain_with_existing_handler(self):
-        for text in ('/search example', '普通搜索内容', '/folder_other'):
+        for text in ('/catalog', '/search example', '普通搜索内容', '/folder_other'):
             self.assertFalse(is_bridge_update(raw_message(text), 7))
         self.assertFalse(is_bridge_update({'callback_query': {'id': 'abc'}}, 7))
 

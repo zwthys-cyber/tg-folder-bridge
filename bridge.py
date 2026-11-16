@@ -99,7 +99,6 @@ class Bridge:
                                        self.receive_file), group=-100)
         app.add_handler(CommandHandler('fetch', self.fetch), group=-100)
         app.add_handler(CommandHandler('start', self.start_command), group=-100)
-        app.add_handler(CommandHandler('catalog', self.catalog_command), group=-100)
         app.add_handler(CommandHandler('favorites', self.favorites_command), group=-100)
         app.add_handler(CommandHandler('help', self.help_command), group=-100)
         app.add_handler(CommandHandler('folder', self.folder), group=-100)
@@ -196,7 +195,7 @@ class Bridge:
         self.reconnect_required = False
 
     async def update_menu(self, bot):
-        public = [BotCommand('start', '查看文件夹列表'), BotCommand('catalog', '浏览文件夹'),
+        public = [BotCommand('start', '资源统计与文件夹列表'),
                   BotCommand('favorites', '我的收藏'),
                   BotCommand('help', '使用帮助')]
         await bot.set_my_commands(public)
@@ -226,12 +225,6 @@ class Bridge:
             await context.bot.send_message(update.effective_chat.id, resource_summary(stats))
             text,markup=catalog_page(rows)
             await context.bot.send_message(update.effective_chat.id,text,reply_markup=markup)
-        raise ApplicationHandlerStop
-
-    async def catalog_command(self, update, context):
-        if update.effective_chat.type == 'private':
-            text, markup = catalog_page(self.store.catalog())
-            await context.bot.send_message(update.effective_chat.id, text, reply_markup=markup)
         raise ApplicationHandlerStop
 
     async def help_command(self, update, context):

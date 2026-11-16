@@ -72,7 +72,7 @@ class Parsing(unittest.TestCase):
 
 
 class CloudTransfer(unittest.IsolatedAsyncioTestCase):
-    async def test_start_sends_statistics_then_catalog_but_catalog_only_sends_list(self):
+    async def test_start_sends_statistics_then_catalog(self):
         bot=NS(send_message=AsyncMock())
         update=NS(effective_chat=NS(type='private',id=7))
         with self.assertRaises(ApplicationHandlerStop):
@@ -82,11 +82,6 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(messages[0].startswith('📊 资源统计'))
         self.assertIn('文件夹：0 个',messages[0])
         self.assertTrue(messages[1].startswith('📁 文件夹列表'))
-        bot.send_message.reset_mock()
-        with self.assertRaises(ApplicationHandlerStop):
-            await self.bridge.catalog_command(update,NS(bot=bot))
-        self.assertEqual(bot.send_message.await_count,1)
-        self.assertTrue(bot.send_message.call_args.args[1].startswith('📁 文件夹列表'))
 
     async def test_upload_order_matches_source_even_when_native_video_arrives_later(self):
         media=[NS(chat_id=101,id=n,raw_text='',photo=None,document=NS(id=n),
@@ -429,7 +424,7 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         bot = NS(set_my_commands=AsyncMock())
         await self.bridge.update_menu(bot)
         calls = bot.set_my_commands.call_args_list
-        self.assertEqual([x.command for x in calls[0].args[0]], ['start', 'catalog', 'favorites', 'help'])
+        self.assertEqual([x.command for x in calls[0].args[0]], ['start', 'favorites', 'help'])
         self.assertIn('fetch', [x.command for x in calls[-1].args[0]])
 
     async def test_next_group_reuses_button_and_message_id_without_repeat_clicks(self):
