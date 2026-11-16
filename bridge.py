@@ -691,12 +691,14 @@ class Bridge:
             try:
                 await asyncio.wait_for(self.collect_with_recovery(row['link'], job), self.timeout)
                 n = self.store.processed_count(job_id)
-                complete = job['expected'] is not None and n == job['expected']
+                complete = job['expected'] is not None and n == job['expected'] and not job.get('audit_unmatched')
                 detail = '' if complete else '发送已静默，无法确认全部文件已收到。'
                 if job.get('preview_warnings'):
                     detail += ' 部分 HEIC 预览未生成，原文件已保留。'
                 if job.get('resume_lookup_warnings'):
                     detail += ' 部分旧媒体标识无法恢复，可能有重新上传的文件。'
+                if job.get('audit_unmatched'):
+                    detail += ' 部分来源无法匹配已有索引，未重新上传；需要检查来源变化。'
                 if job.get('callback_timeout') and not complete:
                     detail += ' 源机器人未确认某次翻组点击，可稍后续传重试。'
                 self.store.update(job_id, 'complete' if complete else 'needs_review', job['expected'], detail)
@@ -1088,5 +1090,8 @@ class Bridge:
                     elif not self.document_groups and not previous.get('preview_file_id'):
                         await self.transfer_media(message, previous_key, job, preview_only=True)
             else:
+                if job.get('dedup_audit'):
+                    job['audit_unmatched'] = True
+                    continue
                 await self.transfer_media(message, key, job)
             await asyncio.sleep(self.transfer_pause)
