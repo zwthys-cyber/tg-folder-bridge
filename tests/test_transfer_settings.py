@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from transfer_settings import load, save, validate
+from transfer_settings import automatic, load, save, validate
 
 
 class Settings(unittest.TestCase):
@@ -18,3 +18,13 @@ class Settings(unittest.TestCase):
         for value in (0, 33, -1, True, 3.5, '32'):
             with self.assertRaises(ValueError):
                 validate(value, 32)
+
+    def test_automatic_mode_is_opt_in_persisted_and_manual_clears_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'performance.json'
+            self.assertFalse(automatic(path))
+            save(path, 32, 24, True)
+            self.assertTrue(automatic(path))
+            self.assertEqual(load(path, 8, 8), (32, 24))
+            save(path, 8, 8)
+            self.assertFalse(automatic(path))

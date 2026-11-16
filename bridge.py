@@ -19,6 +19,7 @@ from fast_upload import upload_file
 from catalog_ui import catalog_page, send_file_page
 import transfer_settings
 from transport_recovery import Cooldown, error_detail, rate_wait
+from adaptive_speed import AdaptiveSpeed
 
 
 class Bridge:
@@ -49,6 +50,9 @@ class Bridge:
         self.settings_file = root / 'performance.json'
         self.download_workers, self.upload_workers = transfer_settings.load(
             self.settings_file, self.download_workers, self.upload_workers)
+        self.automatic_speed = transfer_settings.automatic(self.settings_file)
+        self.tuners = dict(下载=AdaptiveSpeed(self.download_workers),
+                          上传=AdaptiveSpeed(self.upload_workers))
         self.cooldown = Cooldown(root / 'rate-limit.json')
         self.reconnect_required = False
         self.transfer_mode = os.getenv('TRANSFER_MODE', 'forward')
@@ -299,17 +303,26 @@ class Bridge:
             raise ApplicationHandlerStop
         if context.args:
             try:
-                if len(context.args) != 2:
+                automatic = context.args[0].lower() == 'auto'
+                args = context.args[1:] if automatic else context.args
+                if automatic and not args:
+                    args = ['32', '32']
+                if len(args) != 2:
                     raise ValueError
-                download, upload = transfer_settings.validate(*map(int, context.args))
-                transfer_settings.save(self.settings_file, download, upload)
+                download, upload = transfer_settings.validate(*map(int, args))
+                transfer_settings.save(self.settings_file, download, upload, automatic)
                 self.download_workers, self.upload_workers = download, upload
+                self.automatic_speed = automatic
+                self.tuners['下载'].configure(download)
+                self.tuners['上传'].configure(upload)
             except ValueError:
-                await update.message.reply_text('用法：/speed 下载并发 上传并发；每项为 1–32，例如 /speed 32 32')
+                await update.message.reply_text('自动调速：/speed auto 32 32\n固定并发：/speed 8 8\n下载、上传上限均为 1–32。')
                 raise ApplicationHandlerStop
         await update.message.reply_text(
-            f'下载并发 {self.download_workers} 路；上传并发 {self.upload_workers} 路。\n' +
+            ('自动调速：' if self.automatic_speed else '固定并发：') +
+            f'下载上限 {self.download_workers} 路；上传上限 {self.upload_workers} 路。\n' +
             ('设置已保存。' if context.args else '调整：/speed 下载并发 上传并发（1–32）。') +
+            ('从当前安全并发分别采样，吞吐提升才保留更高并发，收益不足自动回退。\n' if self.automatic_speed else '') +
             '进行中的并发传输会在后续分块采用新上限，已发出的请求正常完成。\n'
             '小文件和兼容回退仍使用单路；并发越高不保证越快。')
         if self.cooldown.remaining():
@@ -435,7 +448,10 @@ class Bridge:
         if wait is not None:
             self.download_workers = max(1, min(8, self.download_workers // 2))
             self.upload_workers = max(1, min(8, self.upload_workers // 2))
-            transfer_settings.save(self.settings_file, self.download_workers, self.upload_workers)
+            transfer_settings.save(self.settings_file, self.download_workers, self.upload_workers,
+                                   self.automatic_speed)
+            self.tuners['下载'].configure(self.download_workers)
+            self.tuners['上传'].configure(self.upload_workers)
             self.cooldown.defer(wait, error_detail(error))
         elif not self.cooldown.remaining():
             self.cooldown.defer(5 * 2**attempt, error_detail(error))
@@ -532,12 +548,20 @@ class Bridge:
                 await self.app.bot.send_message(row['owner'],
                     f"任务 {job_id}：{status['state']}\n{status['detail']}\n/folder {job_id}")
 
+    def worker_limit(self, direction):
+        ceiling = self.download_workers if direction == '下载' else self.upload_workers
+        return min(ceiling, self.tuners[direction].current) if self.automatic_speed else ceiling
+
     def progress(self, job, label):
         started = time.monotonic()
         last_update = -float('inf')
 
         def callback(current, total):
             nonlocal last_update
+            direction = '下载' if label == '下载' else '上传'
+            metrics = job.get('download_stats' if direction == '下载' else 'upload_stats', {})
+            if self.automatic_speed and metrics.get('parts'):
+                self.tuners[direction].observe(current, total, metrics['parts'])
             now = time.monotonic()
             if now - last_update < 3 and (not total or current < total):
                 return
@@ -561,6 +585,8 @@ class Bridge:
                 detail += f"\n上传并发 {metrics.get('workers', 1)} 路"
                 if metrics.get('parts'):
                     detail += f"；分块平均等待 {1000 * metrics['wait_seconds'] / metrics['parts']:.0f} ms"
+            if self.automatic_speed and metrics.get('parts'):
+                detail += f'\n自动调速：{self.tuners[direction].note}；下一批并发 {self.worker_limit(direction)} 路'
             self.store.update(job['id'], 'running', job['expected'], detail)
         return callback
 
@@ -569,9 +595,10 @@ class Bridge:
             job['phase'] = '下载'
             self.store.update(job['id'], 'running', job['expected'], '正在下载一个文件到临时目录。')
             job['download_stats'] = {}
+            self.tuners['下载'].begin()
             async with self.spool.stage(self.client, message, progress=self.progress(job, '下载'),
                                         workers=self.download_workers, stats=job['download_stats'],
-                                        worker_limit=lambda: self.download_workers) as path:
+                                        worker_limit=lambda: self.worker_limit('下载')) as path:
                 preview = None
                 thumbnail = None
                 if self.heic_previews:
@@ -621,10 +648,11 @@ class Bridge:
                 await self.client.forward_messages(self.destination, message)
             else:
                 self.active['upload_stats'] = {}
+                self.tuners['上传'].begin()
                 uploaded = await upload_file(
                     self.client, upload_path,
                     progress=self.progress(self.active, '上传预览' if preview else '上传'),
-                    workers=self.upload_workers, worker_limit=lambda: self.upload_workers,
+                    workers=self.upload_workers, worker_limit=lambda: self.worker_limit('上传'),
                     stats=self.active['upload_stats'])
                 self.store.update(self.active['id'], 'running', self.active['expected'], '上传完成，等待机器人确认收件。')
                 self.active['phase'] = '发送媒体消息'

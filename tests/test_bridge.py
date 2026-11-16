@@ -394,6 +394,49 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
             await self.bridge.speed(update, NS(args=['32', '32']))
         self.assertFalse(self.bridge.settings_file.exists())
 
+    async def test_auto_command_sets_independent_bounded_controllers_and_persists(self):
+        from transfer_settings import automatic
+        update = NS(effective_chat=NS(type='private'), effective_user=NS(id=7),
+                    message=NS(reply_text=AsyncMock()))
+        with self.assertRaises(ApplicationHandlerStop):
+            await self.bridge.speed(update, NS(args=['auto', '32', '24']))
+        self.assertTrue(automatic(self.bridge.settings_file))
+        self.assertEqual(self.bridge.worker_limit('下载'), 8)
+        self.assertEqual(self.bridge.worker_limit('上传'), 8)
+        self.bridge.tuners['下载'].current = 16
+        self.assertEqual(self.bridge.worker_limit('下载'), 16)
+        self.assertEqual(self.bridge.worker_limit('上传'), 8)
+        with self.assertRaises(ApplicationHandlerStop):
+            await self.bridge.speed(update, NS(args=['4', '3']))
+        self.assertFalse(self.bridge.automatic_speed)
+        self.assertEqual(self.bridge.worker_limit('下载'), 4)
+        self.assertEqual(self.bridge.worker_limit('上传'), 3)
+
+    async def test_429_keeps_auto_mode_but_reduces_its_ceiling(self):
+        from telethon.errors import InvalidBufferError
+        from transfer_settings import automatic
+        self.bridge.automatic_speed = True
+        self.bridge.download_workers = self.bridge.upload_workers = 32
+        self.bridge.tuners['上传'].current = 24
+        error = InvalidBufferError((-429).to_bytes(4, 'little', signed=True))
+        self.assertTrue(self.bridge.defer_transport(error, 0))
+        self.assertTrue(automatic(self.bridge.settings_file))
+        self.assertLessEqual(self.bridge.worker_limit('上传'), 8)
+        self.assertGreater(self.bridge.cooldown.remaining(), 100)
+
+    async def test_progress_feeds_only_its_direction_before_display_throttling(self):
+        from unittest.mock import Mock
+        self.bridge.automatic_speed = True
+        self.bridge.tuners['上传'].observe = Mock()
+        self.bridge.tuners['下载'].observe = Mock()
+        self.job['upload_stats'] = dict(workers=8, parts=40, wait_seconds=1)
+        callback = self.bridge.progress(self.job, '上传')
+        callback(100, 1000)
+        callback(200, 1000)
+        self.assertEqual(self.bridge.tuners['上传'].observe.call_count, 2)
+        self.bridge.tuners['下载'].observe.assert_not_called()
+        self.assertIn('自动调速', self.bridge.store.get('job')['detail'])
+
     async def test_429_cools_down_reconnects_then_replays_with_saved_files(self):
         from telethon.errors import InvalidBufferError
         from transport_recovery import Cooldown
