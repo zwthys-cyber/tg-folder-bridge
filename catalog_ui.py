@@ -2,12 +2,13 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaDocument, InputMediaVideo
 
 
-def catalog_page(rows, page=1, page_callback_prefix='bridge_catalog'):
+def catalog_page(rows, page=1, page_callback_prefix='bridge_catalog', favorites=False):
     pages = max(1, (len(rows) + 9) // 10)
     page = max(1, min(page, pages))
     start = (page - 1) * 10
     selected = rows[start:start + 10]
-    body = [f'📁 文件夹列表\n\n共 {len(rows)} 个文件夹（第 {page}/{pages} 页）']
+    heading = '⭐ 我的收藏' if favorites else '📁 文件夹列表'
+    body = [f'{heading}\n\n共 {len(rows)} 个文件夹（第 {page}/{pages} 页）']
     buttons = []
     for i, row in enumerate(selected, start + 1):
         title = row['title'] or ('文件夹 ' + row['id'][:8])
@@ -26,7 +27,9 @@ def catalog_page(rows, page=1, page_callback_prefix='bridge_catalog'):
     if navigation:
         buttons.append(navigation)
     if not rows:
-        body.append('暂时没有已导入完成的文件夹，请稍后查看。')
+        body.append('你还没有收藏文件夹。' if favorites else '暂时没有已导入完成的文件夹，请稍后查看。')
+    buttons.append([InlineKeyboardButton('📁 文件夹列表' if favorites else '⭐ 我的收藏',
+                    callback_data='bridge_catalog:1' if favorites else 'bridge_favorites:1')])
     return '\n\n'.join(body), InlineKeyboardMarkup(buttons)
 
 
@@ -57,9 +60,15 @@ def folder_details(job, items, starting=True):
             + ('⏳ 开始发送内容...' if starting else '👇 点击下方按钮查看内容'))
 
 
-async def send_folder_card(bot, chat, job, items, photo=None):
+def favorite_button(job, saved=False):
+    return InlineKeyboardButton('⭐ 已收藏' if saved else '☆ 收藏',
+        callback_data=f"{'bridge_unfav' if saved else 'bridge_fav'}:{job['id']}")
+
+
+async def send_folder_card(bot, chat, job, items, photo=None, favorite=False):
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton('查看内容', callback_data=f"bridge_view:{job['id']}:1")],
+        [favorite_button(job,favorite),InlineKeyboardButton('⭐ 我的收藏',callback_data='bridge_favorites:1')],
         [InlineKeyboardButton('文件夹列表', callback_data='bridge_catalog:1')]])
     text = folder_details(job, items, starting=False)
     if photo:
@@ -79,12 +88,15 @@ def file_pages(items):
     return groups or [[]]
 
 
-async def send_file_page(bot, chat, job, items, page, send_one):
+async def send_file_page(bot, chat, job, items, page, send_one, progress=None, favorite=False):
     groups = file_pages(items)
     pages = len(groups)
     page = max(1, min(page, pages))
     title = job.get('title') or ('文件夹 ' + job['id'][:8])
-    await bot.send_message(chat, folder_details(job, items), parse_mode=None)
+    if (progress is not None and not progress.details_sent) or (progress is None and page == 1):
+        await bot.send_message(chat, folder_details(job, items), parse_mode=None)
+        if progress is not None:
+            progress.record_details()
     selected = groups[page-1]
     album = []
     media_types = {'document': InputMediaDocument, 'video': InputMediaVideo}
@@ -100,6 +112,8 @@ async def send_file_page(bot, chat, job, items, page, send_one):
                 await send_one(bot, chat, album[0], use_preview=False)
             else:
                 await send_one(bot, chat, album[0])
+        if album and progress is not None:
+            progress.record(album)
         album.clear()
 
     for item in selected:
@@ -110,12 +124,25 @@ async def send_file_page(bot, chat, job, items, page, send_one):
         else:
             await flush()
             await send_one(bot, chat, item)
+            if progress is not None:
+                progress.record([item])
     await flush()
     nav = []
+    prefix = f'bridge_page:{progress.id}' if progress is not None else f"bridge_view:{job['id']}"
     if page > 1:
-        nav.append(InlineKeyboardButton('⬅️ 上一组', callback_data=f"bridge_view:{job['id']}:{page-1}"))
+        nav.append(InlineKeyboardButton('⬅️ 上一组', callback_data=f'{prefix}:{page-1}'))
     if page < pages:
-        nav.append(InlineKeyboardButton('下一组 ➡️', callback_data=f"bridge_view:{job['id']}:{page+1}"))
-    keyboard = ([nav] if nav else []) + [[InlineKeyboardButton('📁 返回文件夹列表', callback_data='bridge_catalog:1')]]
-    await bot.send_message(chat, f'📁 {title}\n共 {len(items)} 个文件（第 {page}/{pages} 组）',
+        nav.append(InlineKeyboardButton('下一组 ➡️', callback_data=f'{prefix}:{page+1}'))
+    keyboard = ([nav] if nav else []) + [
+        [InlineKeyboardButton('📁 文件夹详情',callback_data=f"bridge_open:{job['id']}:1"),favorite_button(job,favorite)],
+        [InlineKeyboardButton('⭐ 我的收藏',callback_data='bridge_favorites:1'),
+         InlineKeyboardButton('📁 文件夹列表',callback_data='bridge_catalog:1')]]
+    text = f'📁 {title}\n共 {len(items)} 个文件（第 {page}/{pages} 组）'
+    if progress is not None:
+        received = progress.received_count(items)
+        if received == len(items):
+            text = f'✅ 文件夹内容发送完成\n\n共发送 {progress.message_count} 条消息'
+        elif page == pages:
+            text = f'✅ 当前组发送完成\n\n已发送 {received} / {len(items)} 个文件\n共发送 {progress.message_count} 条消息'
+    await bot.send_message(chat, text,
                            reply_markup=InlineKeyboardMarkup(keyboard))

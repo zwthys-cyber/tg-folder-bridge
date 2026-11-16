@@ -1,7 +1,38 @@
 """Pure parsing and persistent metadata. No media bytes are written here."""
 import re
+import secrets
 import sqlite3
 from urllib.parse import parse_qs, urlparse
+
+
+class ViewProgress:
+    def __init__(self, store, row):
+        self.store,self.id,self.job,self.owner=store,row['id'],row['job'],row['owner']
+
+    @property
+    def details_sent(self):
+        return bool(self.store.db.execute('SELECT detail_sent FROM view_sessions WHERE id=?',(self.id,)).fetchone()[0])
+
+    @property
+    def message_count(self):
+        return self.store.db.execute('SELECT sent_messages FROM view_sessions WHERE id=?',(self.id,)).fetchone()[0]
+
+    def record_details(self):
+        self.store.db.execute('UPDATE view_sessions SET detail_sent=1,sent_messages=sent_messages+1 '
+                              'WHERE id=? AND detail_sent=0',(self.id,))
+        self.store.db.commit()
+
+    def record(self, items):
+        with self.store.db:
+            self.store.db.executemany('INSERT OR IGNORE INTO view_receipts VALUES(?,?,?)',
+                [(self.id,x['source_chat'],x['source_message']) for x in items])
+            self.store.db.execute('UPDATE view_sessions SET sent_messages=sent_messages+? WHERE id=?',
+                                  (len(items),self.id))
+
+    def received_count(self, items):
+        received=set(tuple(r) for r in self.store.db.execute(
+            'SELECT source_chat,source_message FROM view_receipts WHERE session=?',(self.id,)))
+        return sum((x['source_chat'],x['source_message']) in received for x in items)
 
 
 def parse_link(url, allowed):
@@ -70,6 +101,17 @@ class Store:
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
         self.db.executescript('''
+            CREATE TABLE IF NOT EXISTS favorites (
+                owner INTEGER, job TEXT, PRIMARY KEY(owner,job)
+            );
+            CREATE TABLE IF NOT EXISTS view_sessions (
+                id TEXT PRIMARY KEY, owner INTEGER, job TEXT,
+                detail_sent INTEGER DEFAULT 0, sent_messages INTEGER DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS view_receipts (
+                session TEXT, source_chat INTEGER, source_message INTEGER,
+                PRIMARY KEY(session,source_chat,source_message)
+            );
             CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY, owner INTEGER, link TEXT,
                 state TEXT, expected INTEGER, detail TEXT DEFAULT ''
@@ -222,6 +264,32 @@ class Store:
     def set_cover(self, job, file_id):
         self.db.execute('UPDATE jobs SET cover_file_id=? WHERE id=?', (file_id, job))
         self.db.commit()
+
+    def is_favorite(self, owner, job):
+        return bool(self.db.execute('SELECT 1 FROM favorites WHERE owner=? AND job=?', (owner,job)).fetchone())
+
+    def favorite(self, owner, job, saved=True):
+        if saved:
+            self.db.execute('INSERT OR IGNORE INTO favorites VALUES(?,?)', (owner,job))
+        else:
+            self.db.execute('DELETE FROM favorites WHERE owner=? AND job=?', (owner,job))
+        self.db.commit()
+
+    def favorite_catalog(self, owner):
+        return [dict(r) for r in self.db.execute('''SELECT j.*,count(f.file_id) AS file_count
+            FROM favorites v JOIN jobs j ON j.id=v.job JOIN files f ON f.job=j.id
+            WHERE v.owner=? AND (j.state='complete' OR j.audit_public=1 OR j.owner=?)
+            GROUP BY j.id ORDER BY j.rowid DESC''', (owner,owner))]
+
+    def start_view(self, owner, job):
+        sid=secrets.token_hex(6)
+        self.db.execute('INSERT INTO view_sessions(id,owner,job) VALUES(?,?,?)', (sid,owner,job))
+        self.db.commit()
+        return self.view(sid,owner)
+
+    def view(self, sid, owner):
+        row=self.db.execute('SELECT * FROM view_sessions WHERE id=? AND owner=?', (sid,owner)).fetchone()
+        return ViewProgress(self,dict(row)) if row else None
 
     def processed_count(self, job):
         return len(self.files(job)) + self.db.execute('SELECT count(*) FROM file_aliases WHERE job=?', (job,)).fetchone()[0]

@@ -33,6 +33,9 @@ class Routing(unittest.TestCase):
         self.assertTrue(is_bridge_update(query, 7))
         query['callback_query']['data'] = 'bridge_view:job:1'
         self.assertTrue(is_bridge_update(query, 7))
+        for data in ('bridge_page:session:2','bridge_fav:job','bridge_unfav:job','bridge_favorites:1'):
+            query['callback_query']['data']=data
+            self.assertTrue(is_bridge_update(query,7))
         query['callback_query']['data'] = 'searchkey:5'
         self.assertFalse(is_bridge_update(query, 7))
 

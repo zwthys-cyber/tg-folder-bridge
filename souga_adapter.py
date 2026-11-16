@@ -18,7 +18,8 @@ from bot_api_config import configure
 def is_bridge_update(raw, relay_id):
     callback = raw.get('callback_query', {})
     if (isinstance(callback.get('data'), str)
-            and callback['data'].startswith(('bridge_original:', 'bridge_catalog:', 'bridge_open:', 'bridge_view:', 'bridge_search:'))
+            and callback['data'].startswith(('bridge_original:', 'bridge_catalog:', 'bridge_open:', 'bridge_view:', 'bridge_page:',
+                                             'bridge_fav:', 'bridge_unfav:', 'bridge_favorites:', 'bridge_search:'))
             and callback.get('message', {}).get('chat', {}).get('type') == 'private'):
         return True
     message = raw.get('message')
@@ -27,7 +28,7 @@ def is_bridge_update(raw, relay_id):
     if message.get('chat', {}).get('type') != 'private':
         return False
     text = message.get('text', '').strip()
-    if re.match(r'^/(start|help|catalog|fetch|folder|folders|status|resume|speed|transport|diagnostics|resolve|dedup)(?:@\w+)?(?:\s|$)', text):
+    if re.match(r'^/(start|help|catalog|favorites|fetch|folder|folders|status|resume|speed|transport|diagnostics|resolve|dedup)(?:@\w+)?(?:\s|$)', text):
         return True
     if re.match(r'^https://t\.me/\w+\?start=', text):
         return True

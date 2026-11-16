@@ -11,7 +11,7 @@ class Catalog(unittest.IsolatedAsyncioTestCase):
         self.assertIn('共 12 个文件夹', text)
         self.assertIn('文件夹0（1 个文件）', text)
         self.assertEqual(keyboard.inline_keyboard[0][0].callback_data, 'bridge_open:job0:1')
-        self.assertEqual(keyboard.inline_keyboard[-1][0].callback_data, 'bridge_catalog:2')
+        self.assertEqual(keyboard.inline_keyboard[-2][0].callback_data, 'bridge_catalog:2')
         text, keyboard = catalog_page(rows, 2)
         self.assertIn('11. 📁 文件夹10', text)
         self.assertEqual(keyboard.inline_keyboard[0][0].text, '11')
@@ -59,7 +59,8 @@ class Catalog(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('开始发送内容', args['caption'])
         buttons = args['reply_markup'].inline_keyboard
         self.assertEqual(buttons[0][0].callback_data, 'bridge_view:job:1')
-        self.assertEqual(buttons[1][0].callback_data, 'bridge_catalog:1')
+        self.assertEqual(buttons[1][0].callback_data, 'bridge_fav:job')
+        self.assertEqual(buttons[2][0].callback_data, 'bridge_catalog:1')
 
     async def test_single_remaining_file_does_not_use_invalid_one_item_album(self):
         bot = NS(send_message=AsyncMock(), send_media_group=AsyncMock())

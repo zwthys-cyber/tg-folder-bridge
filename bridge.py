@@ -16,7 +16,7 @@ from core import Store, folder_title, folder_metadata, source_entry, media_count
 from media_spool import MediaSpool
 from previews import document_thumbnail, make_jpeg_preview
 from fast_upload import upload_file
-from catalog_ui import catalog_page, send_file_page, send_folder_card
+from catalog_ui import catalog_page, send_file_page, send_folder_card, favorite_button
 from folder_cover import image_cover
 import transfer_settings
 from transport_recovery import Cooldown, error_detail, rate_wait
@@ -26,7 +26,7 @@ from bot_api_config import endpoint, LOCAL
 from local_upload import eligible, send_local, DeliveryUnknownError
 from content_identity import analyze, preference
 
-VERSION = '0.5.3'
+VERSION = '0.5.4'
 
 
 class Bridge:
@@ -100,6 +100,7 @@ class Bridge:
         app.add_handler(CommandHandler('fetch', self.fetch), group=-100)
         app.add_handler(CommandHandler('start', self.start_command), group=-100)
         app.add_handler(CommandHandler('catalog', self.start_command), group=-100)
+        app.add_handler(CommandHandler('favorites', self.favorites_command), group=-100)
         app.add_handler(CommandHandler('help', self.help_command), group=-100)
         app.add_handler(CommandHandler('folder', self.folder), group=-100)
         app.add_handler(CommandHandler('folders', self.folders), group=-100)
@@ -111,7 +112,7 @@ class Bridge:
         app.add_handler(CommandHandler('resolve', self.resolve_delivery), group=-100)
         app.add_handler(CommandHandler('dedup', self.dedup), group=-100)
         app.add_handler(CallbackQueryHandler(self.original, pattern=r'^bridge_original:'), group=-100)
-        app.add_handler(CallbackQueryHandler(self.catalog_callback, pattern=r'^bridge_(catalog|open|view|search):'), group=-100)
+        app.add_handler(CallbackQueryHandler(self.catalog_callback, pattern=r'^bridge_(catalog|open|view|page|search|fav|unfav|favorites):'), group=-100)
         app.add_handler(MessageHandler(filters.Regex(r'^https://t\.me/\w+\?start='),
                                        self.fetch), group=-100)
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.search_command), group=-100)
@@ -196,6 +197,7 @@ class Bridge:
 
     async def update_menu(self, bot):
         public = [BotCommand('start', '查看文件夹列表'), BotCommand('catalog', '浏览文件夹'),
+                  BotCommand('favorites', '我的收藏'),
                   BotCommand('help', '使用帮助')]
         await bot.set_my_commands(public)
         await bot.set_my_commands(public, scope=BotCommandScopeAllPrivateChats())
@@ -232,6 +234,16 @@ class Bridge:
         await update.message.reply_text(text)
         raise ApplicationHandlerStop
 
+    def favorite_rows(self, uid):
+        return [r for r in self.store.favorite_catalog(uid) if self.can_view(r,uid)]
+
+    async def favorites_command(self, update, context):
+        if update.effective_chat.type == 'private':
+            text,markup=catalog_page(self.favorite_rows(update.effective_user.id),
+                page_callback_prefix='bridge_favorites',favorites=True)
+            await context.bot.send_message(update.effective_chat.id,text,reply_markup=markup)
+        raise ApplicationHandlerStop
+
     async def search_text(self, chat, uid, query):
         rows = self.store.search_catalog(query, uid, owned=uid in self.owners)
         if not rows:
@@ -256,10 +268,12 @@ class Bridge:
             raise ApplicationHandlerStop
         try:
             parts = query.data.split(':')
-            if parts[0] == 'bridge_catalog':
+            if parts[0] in {'bridge_catalog','bridge_favorites'}:
                 page = int(parts[1])
                 await query.answer()
-                text, markup = catalog_page(self.store.catalog(), page)
+                favorites = parts[0] == 'bridge_favorites'
+                rows = self.favorite_rows(update.effective_user.id) if favorites else self.store.catalog()
+                text, markup = catalog_page(rows, page, parts[0], favorites=favorites)
                 if getattr(query.message, 'photo', None):
                     await context.bot.send_message(update.effective_chat.id, text, reply_markup=markup)
                 else:
@@ -273,8 +287,30 @@ class Bridge:
                 text, markup = catalog_page(rows, int(parts[2]), f'bridge_search:{parts[1]}')
                 await query.answer()
                 await query.edit_message_text(f'搜索：{session[1]}\n\n{text}', reply_markup=markup)
+            elif parts[0] in {'bridge_fav','bridge_unfav'}:
+                job=self.store.get(parts[1])
+                if not self.can_view(job,update.effective_user.id):
+                    await query.answer('文件夹尚未就绪或已移除',show_alert=True)
+                    raise ApplicationHandlerStop
+                saved=parts[0]=='bridge_fav'
+                self.store.favorite(update.effective_user.id,job['id'],saved)
+                await query.answer('已收藏，可在“我的收藏”中查看。' if saved else '已取消收藏。')
+                markup=getattr(query.message,'reply_markup',None)
+                if markup:
+                    rows=[[favorite_button(job,saved) if b.callback_data in
+                           {f"bridge_fav:{job['id']}",f"bridge_unfav:{job['id']}"} else b for b in row]
+                          for row in markup.inline_keyboard]
+                    updated=InlineKeyboardMarkup(rows)
+                    if updated != markup:
+                        await query.edit_message_reply_markup(reply_markup=updated)
             else:
-                job = self.store.get(parts[1])
+                progress=None
+                if parts[0]=='bridge_page':
+                    progress=self.store.view(parts[1],update.effective_user.id)
+                    if progress is None:
+                        await query.answer('此浏览会话已过期，请重新打开文件夹。',show_alert=True)
+                        raise ApplicationHandlerStop
+                job = self.store.get(progress.job if progress else parts[1])
                 if not self.can_view(job, update.effective_user.id):
                     await query.answer('文件夹尚未就绪或已移除', show_alert=True)
                     raise ApplicationHandlerStop
@@ -284,8 +320,11 @@ class Bridge:
                 if parts[0] == 'bridge_open' and page == 1:
                     await self.show_folder_card(context.bot, update.effective_chat.id, job, items)
                 else:
+                    if progress is None:
+                        progress=self.store.start_view(update.effective_user.id,job['id'])
                     await send_file_page(context.bot, update.effective_chat.id, job,
-                                         items, page, self.send_stored)
+                                         items, page, self.send_stored,progress=progress,
+                                         favorite=self.store.is_favorite(update.effective_user.id,job['id']))
         except (ValueError, IndexError):
             await query.answer('列表已更新，请重新发送 /start', show_alert=True)
         raise ApplicationHandlerStop
@@ -297,7 +336,8 @@ class Bridge:
                 photo = await image_cover(bot, items)
             except Exception as exc:
                 print('文件夹封面暂不可用：' + type(exc).__name__, flush=True)
-        reply = await send_folder_card(bot, chat, job, items, photo)
+        reply = await send_folder_card(bot, chat, job, items, photo,
+                                       favorite=self.store.is_favorite(chat,job['id']))
         if photo and getattr(reply, 'photo', None):
             self.store.set_cover(job['id'], reply.photo[-1].file_id)
 
@@ -360,7 +400,9 @@ class Bridge:
             if page == 1:
                 await self.show_folder_card(context.bot, update.effective_chat.id, job, files)
             else:
-                await send_file_page(context.bot, update.effective_chat.id, job, files, page, self.send_stored)
+                progress=self.store.start_view(update.effective_user.id,job['id'])
+                await send_file_page(context.bot, update.effective_chat.id, job, files, page, self.send_stored,
+                                     progress=progress,favorite=self.store.is_favorite(update.effective_user.id,job['id']))
             raise ApplicationHandlerStop
         await update.message.reply_text(
             f"任务：{job['id']}\n状态：{job['state']}\n"
