@@ -68,3 +68,24 @@ class Catalog(unittest.IsolatedAsyncioTestCase):
         await send_file_page(bot, 7, dict(id='job', title='示例'), [item], 1, send_one)
         send_one.assert_awaited_once_with(bot, 7, item, use_preview=False)
         bot.send_media_group.assert_not_awaited()
+
+    async def test_playable_videos_stay_in_one_album_after_document_pages(self):
+        bot = NS(send_message=AsyncMock(), send_media_group=AsyncMock())
+        send_one = AsyncMock()
+        items = [dict(kind='document', file_id=f'doc{i}') for i in range(24)]
+        items += [dict(kind='video', file_id=f'video{i}') for i in range(7)]
+        await send_file_page(bot, 7, dict(id='job', title='示例'), items, 4, send_one)
+        album = bot.send_media_group.call_args.kwargs['media']
+        self.assertEqual([x.media for x in album], [f'video{i}' for i in range(7)])
+        self.assertTrue(all(x.type=='video' for x in album))
+        send_one.assert_not_awaited()
+        self.assertIn('第 4/4 组', bot.send_message.call_args_list[-1].args[1])
+
+    async def test_eleven_videos_split_at_ten_and_keep_last_video_playable(self):
+        bot = NS(send_message=AsyncMock(), send_media_group=AsyncMock())
+        send_one = AsyncMock()
+        items = [dict(kind='video', file_id=f'video{i}') for i in range(11)]
+        await send_file_page(bot, 7, dict(id='job', title='示例'), items, 1, send_one)
+        self.assertEqual(len(bot.send_media_group.call_args.kwargs['media']),10)
+        await send_file_page(bot, 7, dict(id='job', title='示例'), items, 2, send_one)
+        send_one.assert_awaited_once_with(bot,7,items[-1])

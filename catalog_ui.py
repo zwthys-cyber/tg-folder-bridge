@@ -1,5 +1,5 @@
 """Telegram-native folder lists and file albums."""
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaDocument
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaDocument, InputMediaVideo
 
 
 def catalog_page(rows, page=1, page_callback_prefix='bridge_catalog'):
@@ -68,26 +68,45 @@ async def send_folder_card(bot, chat, job, items, photo=None):
     return await bot.send_message(chat_id=chat, text=text, parse_mode=None, reply_markup=keyboard)
 
 
+def file_pages(items):
+    groups = []
+    for item in items:
+        family = item['kind'] if item['kind'] in {'document', 'video'} else 'other'
+        if (not groups or len(groups[-1]) == 10
+                or family != (groups[-1][0]['kind'] if groups[-1][0]['kind'] in {'document', 'video'} else 'other')):
+            groups.append([])
+        groups[-1].append(item)
+    return groups or [[]]
+
+
 async def send_file_page(bot, chat, job, items, page, send_one):
-    pages = max(1, (len(items) + 9) // 10)
+    groups = file_pages(items)
+    pages = len(groups)
     page = max(1, min(page, pages))
     title = job.get('title') or ('文件夹 ' + job['id'][:8])
     await bot.send_message(chat, folder_details(job, items), parse_mode=None)
-    selected = items[(page-1)*10:page*10]
-    documents = []
+    selected = groups[page-1]
+    album = []
+    media_types = {'document': InputMediaDocument, 'video': InputMediaVideo}
 
     async def flush():
-        if len(documents) >= 2:
-            await bot.send_media_group(chat_id=chat, media=[InputMediaDocument(
+        if len(album) >= 2:
+            media_type = media_types[album[0]['kind']]
+            await bot.send_media_group(chat_id=chat, media=[media_type(
                 media=x['file_id'], caption=x.get('caption', '')[:1024], parse_mode=None)
-                for x in documents])
-        elif documents:
-            await send_one(bot, chat, documents[0], use_preview=False)
-        documents.clear()
+                for x in album])
+        elif album:
+            if album[0]['kind'] == 'document':
+                await send_one(bot, chat, album[0], use_preview=False)
+            else:
+                await send_one(bot, chat, album[0])
+        album.clear()
 
     for item in selected:
-        if item['kind'] == 'document':
-            documents.append(item)
+        if item['kind'] in media_types:
+            if album and album[0]['kind'] != item['kind']:
+                await flush()
+            album.append(item)
         else:
             await flush()
             await send_one(bot, chat, item)
