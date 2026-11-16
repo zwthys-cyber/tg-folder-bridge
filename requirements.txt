@@ -4,3 +4,4 @@ python-dotenv==1.2.1
 cryptg==0.6.1
 Pillow==13.0.0
 pillow-heif==1.8.1
+imageio-ffmpeg==0.8.1

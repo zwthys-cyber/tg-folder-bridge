@@ -292,7 +292,7 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
                                 send_message=AsyncMock(side_effect=send), disconnect=AsyncMock())
         self.bridge.transfer_media = AsyncMock()
         await self.bridge.collect('https://t.me/epan?start=s_abc', self.job)
-        self.bridge.transfer_media.assert_awaited_once_with(incoming, (101, 3), self.job, preview_only=True)
+        self.bridge.transfer_media.assert_awaited_once_with(incoming, (101, 3), self.job, replace_original=True)
 
     async def test_original_callback_checks_task_ownership(self):
         self.bridge.owners.add(8)
@@ -303,3 +303,65 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
             await self.bridge.original(update, NS(bot=bot))
         bot.send_document.assert_not_awaited()
         query.answer.assert_awaited_once_with('文件不存在或无权查看', show_alert=True)
+
+    async def test_public_catalog_exposes_only_completed_folders(self):
+        self.bridge.store.set_title('job', '测试文件夹')
+        self.bridge.store.add_file('job', (1, 2), NS(chat_id=7, message_id=9), 'file', 'document')
+        self.assertEqual(self.bridge.store.catalog(), [])
+        self.assertFalse(self.bridge.can_view(self.bridge.store.get('job'), 999))
+        self.bridge.store.update('job', 'complete', 1)
+        rows = self.bridge.store.catalog()
+        self.assertEqual(rows[0]['title'], '测试文件夹')
+        self.assertEqual(rows[0]['file_count'], 1)
+        self.assertTrue(self.bridge.can_view(self.bridge.store.get('job'), 999))
+
+    async def test_menu_has_public_browse_and_private_admin_commands(self):
+        bot = NS(set_my_commands=AsyncMock())
+        await self.bridge.update_menu(bot)
+        calls = bot.set_my_commands.call_args_list
+        self.assertEqual([x.command for x in calls[0].args[0]], ['start', 'catalog', 'help'])
+        self.assertIn('fetch', [x.command for x in calls[-1].args[0]])
+
+    async def test_next_group_reuses_button_and_message_id_without_repeat_clicks(self):
+        root = NS(chat_id=101, id=1, raw_text='📁 测试文件夹\n图片数：3',
+                  photo=None, document=None, buttons=[])
+        media = [NS(chat_id=101, id=i+2, raw_text='', photo=None,
+                    document=NS(id=100+i), buttons=[]) for i in range(3)]
+        footer = []
+        button = NS(text='➡️ 点击查看下一组', url=None, data=b'next', click=AsyncMock())
+        for count in (22, 44, 64):
+            footer.append(NS(chat_id=101, id=99, raw_text=f'当前批次发送完成\n已发送：{count}/64 条消息',
+                             photo=None, document=None, buttons=[[button]]))
+
+        async def start(*args):
+            for item in (root, media[0], footer[0], footer[0]):
+                await self.job['events'].put(item)
+
+        async def click():
+            index = button.click.await_count
+            await self.job['events'].put(media[index])
+            await self.job['events'].put(footer[index])
+
+        async def save(message, source, job, **kwargs):
+            self.bridge.store.add_file('job', source, NS(chat_id=7, message_id=message.id),
+                                       f'file-{message.id}', 'document')
+
+        button.click.side_effect = click
+        self.bridge.client = NS(get_entity=AsyncMock(return_value=NS(id=101, bot=True)),
+                                get_messages=AsyncMock(return_value=[]), send_message=AsyncMock(side_effect=start),
+                                disconnect=AsyncMock())
+        self.bridge.transfer_media = AsyncMock(side_effect=save)
+        await self.bridge.collect('https://t.me/epan?start=s_abc', self.job)
+        self.assertEqual(button.click.await_count, 2)
+        self.assertEqual(len(self.bridge.store.files('job')), 3)
+        self.assertEqual(self.bridge.store.get('job')['title'], '测试文件夹')
+
+    async def test_source_prefetches_next_group_before_media_processing(self):
+        handler = AsyncMock()
+        self.job['handle_next_groups'] = handler
+        self.job['chats'].add(101)
+        self.job['baselines'][101] = 0
+        message = NS(id=5, chat_id=101)
+        await self.bridge.source_message(NS(id=5, chat_id=101, message=message))
+        handler.assert_awaited_once_with(message, next_groups_only=True)
+        self.assertIs(self.job['events'].get_nowait(), message)

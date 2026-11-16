@@ -14,6 +14,7 @@ def configure(path):
         'MAX_MEDIA_FILE_GB': '4',
         'MIN_FREE_DISK_GB': '10',
         'JOB_TIMEOUT_SECONDS': '86400',
+        'DISPLAY_MODE': 'document_group',
     }
     lines = []
     for line in text.splitlines():

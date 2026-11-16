@@ -17,7 +17,7 @@ from bridge import Bridge
 def is_bridge_update(raw, relay_id):
     callback = raw.get('callback_query', {})
     if (isinstance(callback.get('data'), str)
-            and callback['data'].startswith('bridge_original:')
+            and callback['data'].startswith(('bridge_original:', 'bridge_catalog:', 'bridge_open:'))
             and callback.get('message', {}).get('chat', {}).get('type') == 'private'):
         return True
     message = raw.get('message')
@@ -26,7 +26,7 @@ def is_bridge_update(raw, relay_id):
     if message.get('chat', {}).get('type') != 'private':
         return False
     text = message.get('text', '').strip()
-    if re.match(r'^/(fetch|folder|folders|status|resume)(?:@\w+)?(?:\s|$)', text):
+    if re.match(r'^/(start|help|catalog|fetch|folder|folders|status|resume)(?:@\w+)?(?:\s|$)', text):
         return True
     if re.match(r'^https://t\.me/\w+\?start=', text):
         return True

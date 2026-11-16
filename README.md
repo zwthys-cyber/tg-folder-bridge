@@ -1,10 +1,14 @@
 # Telegram 文件夹转存机器人
 
+新版 `/start` 为公开文件夹列表：名称、原文件数量、编号按钮和翻页。只有导入完成的文件夹公开展示，普通用户可以浏览；导入、续传、进度和管理仍限 `OWNER_IDS`。原关键词搜索和 resources.db 保留。文件使用带缩略图的 Telegram 原生文档相册，每组最多 10 个，保留原文件名与大小。源机器人的“点击查看下一组”会自动处理，先获取后续消息元数据，媒体仍逐个暂存。
+
+已部署用户更新与清空转存索引后重新导入，见 [UPGRADE_CATALOG.md](UPGRADE_CATALOG.md)。清空索引不删除 Telegram 聊天中的旧媒体。
+
 将 `https://t.me/epan?start=...` 分享链接交给自己的机器人，由专用 Telegram 用户账号打开分享、点击获取文件按钮，跟随允许的机器人跳转，将图片、视频和文档保存到自己的机器人。
 
 默认 `TRANSFER_MODE=forward`，只在 Telegram 内转发，不下载媒体。可选择 `TRANSFER_MODE=download_upload`：逐个文件下载到服务器、重新上传、确认自己的机器人收件后立即删除临时文件。服务器长期保留登录会话和 SQLite 文件索引，机器人通过自己的 `file_id` 取回文件。80 GB 服务器的升级步骤见 [TRANSFER.md](TRANSFER.md)。
 
-下载上传模式支持 HEIC/HEIF 的小型 JPEG 显示预览，原件仍保留，可在预览下点击“下载 HEIC 原图”。大文件支持同一文件的分块并发上传；`/status 任务编号` 查看进度和速度，`/resume 任务编号` 继续旧任务或为已存 HEIC 补预览。实际提速取决于服务器网络和 Telegram 限速。
+下载上传模式可为 HEIC/HEIF、常见图片和视频生成小型 JPEG 缩略图，原文件保持原样。默认 `DISPLAY_MODE=document_group` 显示文件行；旧照片预览模式可用其他 DISPLAY_MODE 值恢复。大文件支持同一文件的分块并发上传；`/status 任务编号` 查看进度和速度，`/resume 任务编号` 继续旧任务。实际提速取决于服务器网络和 Telegram 限速。
 
 ## 当前状态
 

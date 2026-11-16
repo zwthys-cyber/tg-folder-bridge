@@ -18,7 +18,7 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
       - run: pip install -r requirements.txt
-      - run: python -m compileall -q core.py bridge.py media_spool.py previews.py fast_upload.py configure_transfer.py main.py login.py souga_adapter.py integrations tests
+      - run: python -m compileall -q core.py bridge.py catalog_ui.py media_spool.py previews.py fast_upload.py configure_transfer.py reset_transfers.py main.py login.py souga_adapter.py integrations tests
       - run: python -m unittest discover -s tests -v
   package:
     needs: test

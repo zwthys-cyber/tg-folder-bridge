@@ -33,6 +33,20 @@ def media_key(message):
     return ''
 
 
+def pagination_marker(text, labels):
+    """Ignore changing clocks when the actual batch counters stay the same."""
+    combined = text + '\n' + '\n'.join(labels)
+    counters = re.findall(r'(\d+(?:\s*-\s*\d+)?)\s*/\s*(\d+)', combined)
+    if counters:
+        return tuple((re.sub(r'\s+', '', a), b) for a, b in counters)
+    return text, tuple(labels)
+
+
+def folder_title(text):
+    match = re.search(r'^\s*[📁📂]\ufe0f?\s*([^\n]+)', text, re.MULTILINE)
+    return match[1].strip()[:100] if match else ''
+
+
 class Store:
     def __init__(self, path):
         self.db = sqlite3.connect(path)
@@ -55,6 +69,11 @@ class Store:
             self.db.execute("ALTER TABLE files ADD COLUMN preview_file_id TEXT DEFAULT ''")
         if 'media_key' not in columns:
             self.db.execute("ALTER TABLE files ADD COLUMN media_key TEXT DEFAULT ''")
+        if 'has_thumbnail' not in columns:
+            self.db.execute('ALTER TABLE files ADD COLUMN has_thumbnail INTEGER DEFAULT 0')
+        job_columns = {x['name'] for x in self.db.execute('PRAGMA table_info(jobs)')}
+        if 'title' not in job_columns:
+            self.db.execute("ALTER TABLE jobs ADD COLUMN title TEXT DEFAULT ''")
         self.db.execute("UPDATE jobs SET state='interrupted' WHERE state IN ('queued','running')")
         self.db.commit()
 
@@ -91,11 +110,30 @@ class Store:
                         (key, job, *source))
         self.db.commit()
 
-    def add_file(self, job, source, message, file_id, kind, caption=None, source_media_key=''):
+    def set_title(self, job, title):
+        self.db.execute('UPDATE jobs SET title=? WHERE id=?', (title, job))
+        self.db.commit()
+
+    def catalog(self):
+        return [dict(x) for x in self.db.execute('''
+            SELECT jobs.*, count(files.file_id) AS file_count FROM jobs
+            JOIN files ON files.job=jobs.id WHERE jobs.state='complete'
+            GROUP BY jobs.id ORDER BY jobs.rowid DESC
+        ''')]
+
+    def add_file(self, job, source, message, file_id, kind, caption=None, source_media_key='', has_thumbnail=False, replace=False):
+        if replace:
+            self.db.execute('''UPDATE files SET chat=?,message=?,file_id=?,kind=?,caption=?,
+                media_key=?,has_thumbnail=? WHERE job=? AND source_chat=? AND source_message=?''',
+                (message.chat_id, message.message_id, file_id, kind,
+                 (getattr(message, 'caption', None) or '') if caption is None else caption,
+                 source_media_key, int(has_thumbnail), job, *source))
+            self.db.commit()
+            return
         self.db.execute('''INSERT OR IGNORE INTO files
-            (job,source_chat,source_message,chat,message,file_id,kind,caption,media_key)
-            VALUES(?,?,?,?,?,?,?,?,?)''',
+            (job,source_chat,source_message,chat,message,file_id,kind,caption,media_key,has_thumbnail)
+            VALUES(?,?,?,?,?,?,?,?,?,?)''',
             (job, *source, message.chat_id, message.message_id, file_id, kind,
              (getattr(message, 'caption', None) or '') if caption is None else caption,
-             source_media_key))
+             source_media_key, int(has_thumbnail)))
         self.db.commit()
