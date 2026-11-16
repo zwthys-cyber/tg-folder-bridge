@@ -18,7 +18,7 @@ def raw_message(text='', user=7, **media):
 
 class Routing(unittest.TestCase):
     def test_commands_and_share_link_are_routed(self):
-        for text in ('/start', '/catalog', '/help', '/fetch https://t.me/epan?start=x', '/folders', '/folder id 2', '/status id', '/resume id',
+        for text in ('/start', '/catalog', '/help', '/speed 32 32', '/fetch https://t.me/epan?start=x', '/folders', '/folder id 2', '/status id', '/resume id',
                      'https://t.me/epan?start=x'):
             self.assertTrue(is_bridge_update(raw_message(text), 7))
 

@@ -159,3 +159,41 @@ class Downloads(unittest.IsolatedAsyncioTestCase):
             await task
         self.assertTrue(iterators)
         self.assertTrue(all(x.closed for x in iterators))
+
+    async def test_live_limit_changes_in_existing_download_without_losing_ranges(self):
+        data = b'a'*(17*1024**2+123)
+        limit = [2]
+        gate, started = asyncio.Event(), asyncio.Event()
+        active, peak = 0, 0
+
+        class LiveIterator(Iterator):
+            async def __anext__(self):
+                nonlocal active, peak
+                active += 1
+                peak = max(peak, active)
+                if active == 2:
+                    started.set()
+                try:
+                    await gate.wait()
+                    await asyncio.sleep(0.002)
+                    return await super().__anext__()
+                finally:
+                    active -= 1
+
+        def iterate(message, **kwargs):
+            kwargs.pop('request_size')
+            kwargs.pop('file_size')
+            return LiveIterator(data, **kwargs)
+
+        output, stats = io.BytesIO(), {}
+        task = asyncio.create_task(download_file(NS(iter_download=iterate),
+            NS(document=True, file=NS(size=len(data))), output, workers=2,
+            stats=stats, worker_limit=lambda: limit[0]))
+        await started.wait()
+        limit[0] = 32
+        gate.set()
+        await task
+        self.assertEqual(output.getvalue(), data)
+        self.assertGreater(peak, 8)
+        self.assertLessEqual(peak, 32)
+        self.assertEqual(stats['workers'], 32)

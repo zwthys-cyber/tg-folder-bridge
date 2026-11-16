@@ -26,7 +26,7 @@ def is_bridge_update(raw, relay_id):
     if message.get('chat', {}).get('type') != 'private':
         return False
     text = message.get('text', '').strip()
-    if re.match(r'^/(start|help|catalog|fetch|folder|folders|status|resume)(?:@\w+)?(?:\s|$)', text):
+    if re.match(r'^/(start|help|catalog|fetch|folder|folders|status|resume|speed)(?:@\w+)?(?:\s|$)', text):
         return True
     if re.match(r'^https://t\.me/\w+\?start=', text):
         return True

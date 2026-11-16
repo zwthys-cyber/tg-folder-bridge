@@ -73,7 +73,7 @@ class MediaSpool:
             self.lock.close()
 
     @asynccontextmanager
-    async def stage(self, client, message, progress=None, workers=1, stats=None):
+    async def stage(self, client, message, progress=None, workers=1, stats=None, worker_limit=None):
         size = getattr(getattr(message, 'file', None), 'size', None)
         if size is not None and size > self.max_bytes:
             raise MediaTooLargeError('Media exceeds configured limit')
@@ -88,7 +88,8 @@ class MediaSpool:
             path.touch(mode=0o600, exist_ok=False)
             raw = path.open('wb', buffering=0)
             with LimitedWriter(raw, self.root, self.max_bytes, self.reserve_bytes) as stream:
-                await download_file(client, message, stream, progress=progress, workers=workers, stats=stats)
+                await download_file(client, message, stream, progress=progress, workers=workers,
+                                    stats=stats, worker_limit=worker_limit)
             actual = path.stat().st_size
             if actual == 0 or (size is not None and size > 0 and actual != size):
                 raise IncompleteMediaError('Downloaded media size does not match')

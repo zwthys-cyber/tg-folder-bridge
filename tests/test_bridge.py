@@ -377,3 +377,19 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.bridge.search_text(999, 999, '1047'))
         self.assertIn('测试文件夹1047', self.bridge.app.bot.send_message.call_args.args[1])
         self.assertFalse(await self.bridge.search_text(999, 999, '其他关键词'))
+
+    async def test_admin_can_change_both_live_limits_and_persist_them(self):
+        from transfer_settings import load
+        update = NS(effective_chat=NS(type='private'), effective_user=NS(id=7),
+                    message=NS(reply_text=AsyncMock()))
+        with self.assertRaises(ApplicationHandlerStop):
+            await self.bridge.speed(update, NS(args=['32', '32']))
+        self.assertEqual((self.bridge.download_workers, self.bridge.upload_workers), (32, 32))
+        self.assertEqual(load(self.bridge.settings_file, 1, 1), (32, 32))
+
+    async def test_public_user_cannot_change_limits(self):
+        update = NS(effective_chat=NS(type='private'), effective_user=NS(id=999),
+                    message=NS(reply_text=AsyncMock()))
+        with self.assertRaises(ApplicationHandlerStop):
+            await self.bridge.speed(update, NS(args=['32', '32']))
+        self.assertFalse(self.bridge.settings_file.exists())

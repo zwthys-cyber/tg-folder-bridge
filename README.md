@@ -4,6 +4,8 @@
 
 高延迟线路的下载诊断与同文件四路下载设置见 [DOWNLOAD_DIAGNOSTICS.md](DOWNLOAD_DIAGNOSTICS.md)。这次性能升级无需清空任务或重新导入，继续使用 `/resume` 即可。
 
+现已将下载和上传默认并发都提高到 32 路，管理员可用 `/speed 32 32` 在运行中调节两边的并发上限，设置会保存，无需为了调速反复重启。完整说明见 [SPEED.md](SPEED.md)。
+
 已部署用户更新与清空转存索引后重新导入，见 [UPGRADE_CATALOG.md](UPGRADE_CATALOG.md)。清空索引不删除 Telegram 聊天中的旧媒体。
 
 将 `https://t.me/epan?start=...` 分享链接交给自己的机器人，由专用 Telegram 用户账号打开分享、点击获取文件按钮，跟随允许的机器人跳转，将图片、视频和文档保存到自己的机器人。

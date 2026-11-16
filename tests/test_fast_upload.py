@@ -67,3 +67,35 @@ class Upload(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(RuntimeError):
                 await upload_file(send, path, Mock(), workers=3)
             self.assertEqual(active, 0)
+
+    async def test_live_increase_changes_existing_upload_without_restarting_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'large.bin'
+            path.write_bytes(b'a'*(17*1024**2+123))
+            limit = [2]
+            gate, started = asyncio.Event(), asyncio.Event()
+            active, peak = 0, 0
+
+            async def send(request):
+                nonlocal active, peak
+                active += 1
+                peak = max(peak, active)
+                if active == 2:
+                    started.set()
+                try:
+                    await gate.wait()
+                    await asyncio.sleep(0.002)
+                    return True
+                finally:
+                    active -= 1
+
+            stats = {}
+            task = asyncio.create_task(upload_file(send, path, Mock(), workers=2,
+                                                    worker_limit=lambda: limit[0], stats=stats))
+            await started.wait()
+            limit[0] = 32
+            gate.set()
+            await task
+            self.assertGreater(peak, 8)
+            self.assertLessEqual(peak, 32)
+            self.assertEqual(stats['workers'], 32)

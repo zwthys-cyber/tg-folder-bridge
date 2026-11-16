@@ -17,6 +17,7 @@ from media_spool import MediaSpool
 from previews import document_thumbnail, make_jpeg_preview
 from fast_upload import upload_file
 from catalog_ui import catalog_page, send_file_page
+import transfer_settings
 
 
 class Bridge:
@@ -36,14 +37,17 @@ class Bridge:
         self.transfer_pause = float(os.getenv('TRANSFER_PAUSE_SECONDS', '0.2'))
         self.heic_previews = os.getenv('HEIC_PREVIEWS', '1') == '1'
         self.document_groups = os.getenv('DISPLAY_MODE', 'document_group') == 'document_group'
-        self.upload_workers = int(os.getenv('UPLOAD_WORKERS', '3'))
-        self.download_workers = int(os.getenv('DOWNLOAD_WORKERS', '4'))
-        if not 1 <= self.upload_workers <= 4 or not 1 <= self.download_workers <= 4 or self.transfer_pause < 0:
-            raise ValueError('Transfer workers must be 1..4; transfer pause must be nonnegative')
+        self.upload_workers = int(os.getenv('UPLOAD_WORKERS', '32'))
+        self.download_workers = int(os.getenv('DOWNLOAD_WORKERS', '32'))
+        if self.transfer_pause < 0:
+            raise ValueError('Transfer pause must be nonnegative')
         if not self.owners or self.idle <= 0 or self.timeout <= 0:
             raise ValueError('OWNER_IDS 和超时配置无效')
         root = Path(os.getenv('DATA_DIR', 'data'))
         root.mkdir(parents=True, exist_ok=True)
+        self.settings_file = root / 'performance.json'
+        self.download_workers, self.upload_workers = transfer_settings.load(
+            self.settings_file, self.download_workers, self.upload_workers)
         self.transfer_mode = os.getenv('TRANSFER_MODE', 'forward')
         if self.transfer_mode not in {'forward', 'download_upload'}:
             raise ValueError('TRANSFER_MODE must be forward or download_upload')
@@ -75,6 +79,7 @@ class Bridge:
         app.add_handler(CommandHandler('folders', self.folders), group=-100)
         app.add_handler(CommandHandler('status', self.status), group=-100)
         app.add_handler(CommandHandler('resume', self.resume), group=-100)
+        app.add_handler(CommandHandler('speed', self.speed), group=-100)
         app.add_handler(CallbackQueryHandler(self.original, pattern=r'^bridge_original:'), group=-100)
         app.add_handler(CallbackQueryHandler(self.catalog_callback, pattern=r'^bridge_(catalog|open|search):'), group=-100)
         app.add_handler(MessageHandler(filters.Regex(r'^https://t\.me/\w+\?start='),
@@ -110,6 +115,7 @@ class Bridge:
                 await bot.set_my_commands(public + [BotCommand('fetch', '导入分享文件夹'),
                     BotCommand('folders', '查看导入任务'), BotCommand('status', '查看传输进度'),
                     BotCommand('resume', '继续导入任务'), BotCommand('add', '收录搜索资源'),
+                    BotCommand('speed', '调整上传下载并发'),
                     BotCommand('delete', '删除搜索资源')], scope=BotCommandScopeChat(owner))
             except BadRequest:
                 pass  # This owner may not have opened the bot yet.
@@ -128,7 +134,7 @@ class Bridge:
             raise ApplicationHandlerStop
         text = '发送 /start 查看文件夹列表，点击编号打开文件夹。\n文件按组显示缩略图、文件名和大小。\n直接发送关键词搜索文件夹名称，也可搜索原收录资源。'
         if update.effective_user.id in self.owners:
-            text += '\n\n管理员：\n/fetch 分享链接\n/folders 导入任务\n/status 任务编号\n/resume 任务编号\n/add 标题 | 链接 | 关键词\n/delete 编号'
+            text += '\n\n管理员：\n/fetch 分享链接\n/folders 导入任务\n/status 任务编号\n/resume 任务编号\n/speed 下载并发 上传并发\n/add 标题 | 链接 | 关键词\n/delete 编号'
         await update.message.reply_text(text)
         raise ApplicationHandlerStop
 
@@ -268,6 +274,26 @@ class Bridge:
             f"任务：{job['id']}\n状态：{job['state']}\n"
             f"已保存 {n} / {job['expected'] if job['expected'] is not None else '未知'} 个原文件\n"
             f"{job['detail']}")
+        raise ApplicationHandlerStop
+
+    async def speed(self, update, context):
+        if update.effective_chat.type != 'private' or update.effective_user.id not in self.owners:
+            raise ApplicationHandlerStop
+        if context.args:
+            try:
+                if len(context.args) != 2:
+                    raise ValueError
+                download, upload = transfer_settings.validate(*map(int, context.args))
+                transfer_settings.save(self.settings_file, download, upload)
+                self.download_workers, self.upload_workers = download, upload
+            except ValueError:
+                await update.message.reply_text('用法：/speed 下载并发 上传并发；每项为 1–32，例如 /speed 32 32')
+                raise ApplicationHandlerStop
+        await update.message.reply_text(
+            f'下载并发 {self.download_workers} 路；上传并发 {self.upload_workers} 路。\n' +
+            ('设置已保存。' if context.args else '调整：/speed 下载并发 上传并发（1–32）。') +
+            '进行中的并发传输会在后续分块采用新上限，已发出的请求正常完成。\n'
+            '小文件和兼容回退仍使用单路；并发越高不保证越快。')
         raise ApplicationHandlerStop
 
     async def resume(self, update, context):
@@ -455,6 +481,11 @@ class Bridge:
                     detail += f"；分块平均等待 {1000 * metrics['wait_seconds'] / metrics['parts']:.0f} ms"
                 if metrics.get('mode') == 'sdk_fallback':
                     detail += '（CDN/文件引用兼容回退）'
+            elif label.startswith('上传'):
+                metrics = job.get('upload_stats', {})
+                detail += f"\n上传并发 {metrics.get('workers', 1)} 路"
+                if metrics.get('parts'):
+                    detail += f"；分块平均等待 {1000 * metrics['wait_seconds'] / metrics['parts']:.0f} ms"
             self.store.update(job['id'], 'running', job['expected'], detail)
         return callback
 
@@ -463,7 +494,8 @@ class Bridge:
             self.store.update(job['id'], 'running', job['expected'], '正在下载一个文件到临时目录。')
             job['download_stats'] = {}
             async with self.spool.stage(self.client, message, progress=self.progress(job, '下载'),
-                                        workers=self.download_workers, stats=job['download_stats']) as path:
+                                        workers=self.download_workers, stats=job['download_stats'],
+                                        worker_limit=lambda: self.download_workers) as path:
                 preview = None
                 thumbnail = None
                 if self.heic_previews:
@@ -511,10 +543,12 @@ class Bridge:
             if upload_path is None:
                 await self.client.forward_messages(self.destination, message)
             else:
+                self.active['upload_stats'] = {}
                 uploaded = await upload_file(
                     self.client, upload_path,
                     progress=self.progress(self.active, '上传预览' if preview else '上传'),
-                    workers=self.upload_workers)
+                    workers=self.upload_workers, worker_limit=lambda: self.upload_workers,
+                    stats=self.active['upload_stats'])
                 self.store.update(self.active['id'], 'running', self.active['expected'], '上传完成，等待机器人确认收件。')
                 await self.client.send_file(
                     self.destination, uploaded, caption=marker, parse_mode=None,
