@@ -8,6 +8,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     strategy:
       matrix:
         python: ['3.11', '3.12', '3.13']
@@ -19,7 +20,7 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
       - run: python -m compileall -q core.py bridge.py catalog_ui.py media_spool.py previews.py fast_upload.py fast_download.py transfer_settings.py transport_recovery.py adaptive_speed.py upload_transport.py transfer_metrics.py benchmark_upload.py configure_transfer.py reset_transfers.py main.py login.py souga_adapter.py integrations tests
-      - run: python -m unittest discover -s tests -v
+      - run: timeout --kill-after=10s 120s python -u -m unittest discover -s tests -v
   package:
     needs: test
     if: github.event_name != 'pull_request'
