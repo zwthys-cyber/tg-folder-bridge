@@ -67,10 +67,10 @@ class Store:
         return [dict(x) for x in self.db.execute(
             'SELECT * FROM jobs WHERE owner=? ORDER BY rowid DESC LIMIT ?', (owner, limit))]
 
-    def add_file(self, job, source, message, file_id, kind):
+    def add_file(self, job, source, message, file_id, kind, caption=None):
         self.db.execute('''INSERT OR IGNORE INTO files
             (job,source_chat,source_message,chat,message,file_id,kind,caption)
             VALUES(?,?,?,?,?,?,?,?)''',
             (job, *source, message.chat_id, message.message_id, file_id, kind,
-             getattr(message, 'caption', None) or ''))
+             (getattr(message, 'caption', None) or '') if caption is None else caption))
         self.db.commit()

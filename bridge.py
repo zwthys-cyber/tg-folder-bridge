@@ -1,5 +1,5 @@
-"""Telegram user receives files and forwards to the bot; bot stores file_ids.
-Never calls download_media, download_file, getFile or uploads media bytes.
+"""Transfer received media to the bot, which stores its own file_ids.
+Forward-only by default; opt-in download/upload uses a bounded, cleaned spool.
 """
 import asyncio
 import contextlib
@@ -9,8 +9,9 @@ import uuid
 from pathlib import Path
 from telegram.error import BadRequest, RetryAfter
 from telegram.ext import ApplicationHandlerStop, CommandHandler, MessageHandler, filters
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, types
 from core import Store, media_count, parse_link
+from media_spool import MediaSpool
 
 
 class Bridge:
@@ -27,6 +28,15 @@ class Bridge:
             raise ValueError('OWNER_IDS 和超时配置无效')
         root = Path(os.getenv('DATA_DIR', 'data'))
         root.mkdir(parents=True, exist_ok=True)
+        self.transfer_mode = os.getenv('TRANSFER_MODE', 'forward')
+        if self.transfer_mode not in {'forward', 'download_upload'}:
+            raise ValueError('TRANSFER_MODE must be forward or download_upload')
+        self.spool = None
+        if self.transfer_mode == 'download_upload':
+            self.spool = MediaSpool(
+                root / 'spool',
+                int(float(os.getenv('MAX_MEDIA_FILE_GB', '4')) * 1024**3),
+                int(float(os.getenv('MIN_FREE_DISK_GB', '10')) * 1024**3))
         self.store = Store(root / 'index.sqlite3')
         self.client = TelegramClient(str(root / 'relay'), int(os.environ['API_ID']),
                                      os.environ['API_HASH'])
@@ -57,6 +67,7 @@ class Bridge:
             await self.client.disconnect()
             raise RuntimeError('登录账号与 RELAY_USER_ID 不一致')
         self.destination = (await app.bot.get_me()).username
+        print('文件转存模式：' + self.transfer_mode, flush=True)
         self.client.add_event_handler(self.source_message, events.NewMessage(incoming=True))
         self.client.add_event_handler(self.source_message, events.MessageEdited(incoming=True))
         self.worker = asyncio.create_task(self.work())
@@ -70,6 +81,8 @@ class Bridge:
             self.store.update(self.active['id'], 'interrupted', self.active['expected'])
         await self.client.disconnect()
         self.store.db.close()
+        if self.spool:
+            self.spool.close()
 
     async def fetch(self, update, context):
         if update.effective_chat.type != 'private' or update.effective_user.id not in self.owners:
@@ -149,16 +162,23 @@ class Bridge:
     async def receive_file(self, update, context):
         message = update.effective_message
         pending = self.pending
-        if (update.effective_chat.type != 'private' or not message.forward_origin
+        if (update.effective_chat.type != 'private'
                 or not pending or pending['future'].done()):
             # Consume relay messages so existing handlers don't answer each file.
+            raise ApplicationHandlerStop
+        marker = pending.get('marker')
+        if marker:
+            if getattr(message, 'caption', None) != marker:
+                raise ApplicationHandlerStop
+        elif not message.forward_origin:
             raise ApplicationHandlerStop
         for kind in ('photo', 'video', 'document', 'animation', 'audio', 'voice', 'video_note'):
             media = getattr(message, kind, None)
             if media:
                 if kind == 'photo':
                     media = media[-1]
-                self.store.add_file(self.active['id'], pending['source'], message, media.file_id, kind)
+                self.store.add_file(self.active['id'], pending['source'], message, media.file_id,
+                                    kind, caption=pending.get('caption'))
                 pending['future'].set_result(True)
                 break
         raise ApplicationHandlerStop
@@ -197,15 +217,65 @@ class Bridge:
                 raise
             except Exception as exc:
                 # Do not log links, session secrets, or raw Telegram response contents.
+                explanations = {
+                    'InsufficientDiskError': '磁盘剩余空间不足，已停止并清理临时文件。',
+                    'MediaTooLargeError': '单文件超过配置上限，已停止并清理临时文件。',
+                    'IncompleteMediaError': '媒体下载不完整，已清理临时文件。',
+                    'ChatForwardsRestrictedError': '源内容禁止转发；如需下载重传，请启用 download_upload 模式。',
+                }
+                detail = type(exc).__name__
+                if detail in explanations:
+                    detail += '：' + explanations[detail]
                 self.store.update(job_id, 'partial' if self.store.files(job_id) else 'failed',
-                                  job['expected'], type(exc).__name__)
+                                  job['expected'], detail)
             finally:
                 self.pending = None
                 self.active = None
                 self.jobs.task_done()
             with contextlib.suppress(Exception):
+                status = self.store.get(job_id)
                 await self.app.bot.send_message(row['owner'],
-                    f"任务 {job_id}：{self.store.get(job_id)['state']}\n/folder {job_id}")
+                    f"任务 {job_id}：{status['state']}\n{status['detail']}\n/folder {job_id}")
+
+    async def transfer_media(self, message, key, job):
+        if self.transfer_mode == 'download_upload':
+            self.store.update(job['id'], 'running', job['expected'], '正在下载一个文件到临时目录。')
+            async with self.spool.stage(self.client, message) as path:
+                marker = f"bridge:{job['id']}:{uuid.uuid4().hex}"
+                self.store.update(job['id'], 'running', job['expected'], '正在上传文件，确认收件后立即删除临时文件。')
+                # Keep filename/ordinary video/audio metadata. Round videos and
+                # stickers are sent as ordinary attachments so a receipt caption
+                # is available. The marker is not saved as the user's caption.
+                attrs = [a for a in getattr(message.document, 'attributes', [])
+                         if isinstance(a, (types.DocumentAttributeFilename,
+                                           types.DocumentAttributeVideo,
+                                           types.DocumentAttributeAudio))
+                         and not getattr(a, 'round_message', False)]
+                await self.deliver(message, key, marker=marker, upload_path=path, attrs=attrs)
+        else:
+            await self.deliver(message, key)
+
+    async def deliver(self, message, key, marker=None, upload_path=None, attrs=None):
+        future = asyncio.get_running_loop().create_future()
+        self.pending = dict(source=key, future=future)
+        if marker:
+            self.pending.update(marker=marker, caption=message.raw_text or '')
+        try:
+            if upload_path is None:
+                await self.client.forward_messages(self.destination, message)
+            else:
+                await self.client.send_file(
+                    self.destination, str(upload_path), caption=marker, parse_mode=None,
+                    force_document=not bool(message.photo), attributes=attrs or None,
+                    supports_streaming=any(isinstance(a, types.DocumentAttributeVideo)
+                                           for a in attrs or []))
+            await asyncio.wait_for(future, 60)
+        except BaseException:
+            # Do not attribute a late send/forward receipt to another task.
+            self.blocked = True
+            raise
+        finally:
+            self.pending = None
 
     async def collect(self, link, job):
         visited = set()
@@ -245,18 +315,7 @@ class Bridge:
             key = (message.chat_id, message.id)
             if (message.photo or message.document) and key not in seen:
                 seen.add(key)
-                future = asyncio.get_running_loop().create_future()
-                self.pending = dict(source=key, future=future)
-                # Cloud forwarding only; protected content errors surface as task failure.
-                try:
-                    await self.client.forward_messages(self.destination, message)
-                    await asyncio.wait_for(future, 60)
-                except BaseException:
-                    # Prevent delayed forwards from being attributed to the next task.
-                    self.blocked = True
-                    raise
-                finally:
-                    self.pending = None
+                await self.transfer_media(message, key, job)
                 await asyncio.sleep(1)
             for row in message.buttons or []:
                 for button in row:

@@ -2,6 +2,8 @@
 
 目标配置：Python 3.13、标准库 urllib 调用 Bot API、长轮询 getUpdates、systemd 服务 sougabot、项目目录 `/root/sougabot`，原数据库 `/root/sougabot/resources.db`。
 
+如果已经完成接入，现在需要开启逐文件临时下载、上传后删除：直接按 [TRANSFER.md](TRANSFER.md) 更新转存模块和配置即可，无需再次覆盖 `/root/sougabot/bot.py`。
+
 已根据提供的完整 `bot.py` 制作 [接入版 bot.py](integrations/sougabot_bot.py)。保留原搜索、搜索分页、管理员绑定、添加和删除功能，并在原更新循环中先分发转存消息，两个分支都会推进 offset。转存索引仍独立于原 resources.db；导入文件通过 `/folders`、`/folder` 查看，不自动混入原关键词搜索。
 
 ## 已登录中转账号：安装接入版

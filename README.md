@@ -1,12 +1,12 @@
 # Telegram 文件夹转存机器人
 
-将 `https://t.me/epan?start=...` 分享链接交给自己的机器人，由专用 Telegram 用户账号打开分享、点击获取文件按钮，跟随允许的机器人跳转，将图片、视频和文档直接在 Telegram 内转发给自己的机器人。
+将 `https://t.me/epan?start=...` 分享链接交给自己的机器人，由专用 Telegram 用户账号打开分享、点击获取文件按钮，跟随允许的机器人跳转，将图片、视频和文档保存到自己的机器人。
 
-**媒体不下载到服务器。** 服务器只保存 Telegram 登录会话和 SQLite 文件索引。自己的机器人记录收到的 `file_id` 和消息 ID，之后通过 `/folder` 按文件夹取回文件。
+默认 `TRANSFER_MODE=forward`，只在 Telegram 内转发，不下载媒体。可选择 `TRANSFER_MODE=download_upload`：逐个文件下载到服务器、重新上传、确认自己的机器人收件后立即删除临时文件。服务器长期保留登录会话和 SQLite 文件索引，机器人通过自己的 `file_id` 取回文件。80 GB 服务器的升级步骤见 [TRANSFER.md](TRANSFER.md)。
 
 ## 当前状态
 
-本项目根据分享卡片截图实现，支持 URL 按钮和回调按钮。尚未登录真实账号验证 `@epan` 的完整交互，不保证其全部菜单已兼容。GitHub Actions 只检查代码、解析、索引持久化和模拟云端转存，不会连接 Telegram。
+支持 URL 按钮和回调按钮。实际部署已反馈能够读到卡片中的 63 个文件数量，但源聊天禁止转发，forward 模式会返回 ChatForwardsRestrictedError。新下载上传模式仍需真实账号测试；它只能下载账号实际可读取的资源，不保证该分享允许下载，也不保证所有源菜单已兼容。GitHub Actions 检查解析、索引、模拟收件及磁盘清理，不连接真实 Telegram 账号。
 
 卡片上的消息总数可能包含说明文字。例如 64 条消息、2 张图片、46 个视频、15 个文档，媒体预期数量是 63。只有收到数量与卡片媒体数量一致时，任务才标为 `complete`；静默超时且无法核对的任务标为 `needs_review`，已收到的文件仍可取回。`complete` 表示数量核对通过，并不验证每个文件的内容。
 
@@ -96,7 +96,7 @@ app.run_polling(drop_pending_updates=False)
 - 文件存储在 Telegram 中，服务器上的索引需要备份；删除索引会失去按任务检索能力。`/folder` 使用自己机器人的 `file_id` 重新发送，即使中转聊天收件消息已删除也不依赖原消息；不保证文件在 Telegram 中永久可用。caption 保留为普通文本，原格式实体不保留。
 - 默认只跟随 `epan`、`SPXM111_bot`，实际按钮指向其他机器人时需在 `.env` 的 `ALLOWED_SOURCE_BOTS` 增加目标。只自动点击 `BUTTON_LABELS` 匹配的获取/下载/翻页按钮，最多执行 100 次操作。
 - 需要加入频道、密码、付费或其他交互时，任务可能结束为 `needs_review`。程序不自动处理这些步骤。
-- 源内容禁止转发时报告失败，不下载重传。图片相册逐条转存，原相册分组和嵌套目录层级暂不保留；一个分享对应一个文件夹索引。
+- forward 模式遇到禁止转发会失败。显式开启 download_upload 后，会尝试下载账号可访问的媒体再上传，不能恢复已删除、不可访问或下载被拒绝的文件。图片相册逐条转存，原相册分组和嵌套目录层级暂不保留；一个分享对应一个文件夹索引。
 - 服务不读取源机器人历史文件，不保证断线期间消息补齐。重启将未完成任务标为 `interrupted`；需确认源发送已停止后重新提交，重新导入会产生新任务。
 - 默认 45 秒无新消息结束收集，整个任务最多一小时；可用 `IDLE_SECONDS`、`JOB_TIMEOUT_SECONDS` 调整。服务无通用的源请求关联标识，使用专用中转账号、串行任务和独占源聊天；特别慢的上一任务回复仍可能影响后一任务，需要根据实际发送方式联调。
 - Telegram 对同一机器人收到的文件提供自己的 `file_id`，不能直接复用对方机器人的 `file_id`。参考 [Telegram 文件说明](https://core.telegram.org/bots/api#file)、[Telethon 转发接口](https://docs.telethon.dev/en/stable/modules/client.html#telethon.client.messages.MessageMethods.forward_messages)。

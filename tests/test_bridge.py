@@ -74,6 +74,8 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         self.bridge.store.db.close()
         await self.bridge.client.disconnect()
+        if self.bridge.spool:
+            self.bridge.spool.close()
         self.env.stop()
         self.tmp.cleanup()
 
@@ -167,3 +169,48 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
             await self.bridge.folder(update, NS(args=['job'], bot=bot))
         bot.send_video.assert_not_awaited()
         bot.send_photo.assert_not_awaited()
+
+    async def test_reupload_receipt_records_own_id_and_removes_local_media(self):
+        from media_spool import MediaSpool
+        self.bridge.transfer_mode = 'download_upload'
+        self.bridge.spool = MediaSpool(Path(self.tmp.name) / 'spool', 1024, 1)
+        media = NS(chat_id=101, id=3, raw_text='原始说明', photo=None,
+                   document=NS(attributes=[]), file=NS(size=4, ext='.mp4'))
+        local_paths = []
+
+        async def download(message, file):
+            file.write(b'data')
+
+        async def upload(destination, file, caption, **kwargs):
+            path = Path(file)
+            local_paths.append(path)
+            self.assertEqual(path.read_bytes(), b'data')
+            received = NS(chat_id=7, message_id=100, forward_origin=None,
+                          caption=caption, photo=None, video=NS(file_id='uploaded-own-id'))
+            update = NS(effective_message=received, effective_chat=NS(type='private'))
+            with self.assertRaises(ApplicationHandlerStop):
+                await self.bridge.receive_file(update, None)
+            # Cleanup waits until the complete delivery/receipt flow exits.
+            self.assertTrue(path.exists())
+
+        self.bridge.client = NS(download_media=AsyncMock(side_effect=download),
+                                send_file=AsyncMock(side_effect=upload),
+                                disconnect=AsyncMock())
+        await self.bridge.transfer_media(media, (101, 3), self.job)
+        self.assertFalse(local_paths[0].exists())
+        self.assertEqual(list(self.bridge.spool.root.glob('transfer-*')), [])
+        saved = self.bridge.store.files('job')[0]
+        self.assertEqual(saved['file_id'], 'uploaded-own-id')
+        self.assertEqual(saved['caption'], '原始说明')
+
+    async def test_wrong_upload_marker_cannot_confirm_receipt(self):
+        future = asyncio.get_running_loop().create_future()
+        self.bridge.pending = dict(source=(101, 3), future=future,
+                                   marker='expected-marker', caption='original')
+        update = NS(effective_chat=NS(type='private'), effective_message=NS(
+            caption='other-marker', forward_origin=None, photo=[NS(file_id='wrong-id')]))
+        with self.assertRaises(ApplicationHandlerStop):
+            await self.bridge.receive_file(update, None)
+        self.assertFalse(future.done())
+        self.assertEqual(self.bridge.store.files('job'), [])
+        future.cancel()
