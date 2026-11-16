@@ -12,7 +12,7 @@ from telegram import BotCommand, BotCommandScopeAllPrivateChats, BotCommandScope
 from telegram.error import BadRequest, RetryAfter
 from telegram.ext import ApplicationHandlerStop, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 from telethon import TelegramClient, events, types
-from core import Store, folder_title, media_count, media_key, pagination_marker, parse_link
+from core import Store, folder_title, folder_metadata, source_entry, media_count, media_key, pagination_marker, parse_link
 from media_spool import MediaSpool
 from previews import document_thumbnail, make_jpeg_preview
 from fast_upload import upload_file
@@ -25,7 +25,7 @@ from bot_api_config import endpoint, LOCAL
 from local_upload import eligible, send_local, DeliveryUnknownError
 from content_identity import analyze, preference
 
-VERSION = '0.5.0'
+VERSION = '0.5.1'
 
 
 class Bridge:
@@ -1057,6 +1057,7 @@ class Bridge:
                 title = folder_title(message.raw_text or '')
                 if title:
                     self.store.set_title(job['id'], title)
+            self.store.set_folder_metadata(job['id'], folder_metadata(message.raw_text or ''))
             key = (message.chat_id, message.id)
             if (message.photo or message.document) and key not in seen:
                 seen.add(key)
@@ -1066,6 +1067,7 @@ class Bridge:
             await handle_buttons(message)
             if job['expected'] is not None and len(plan) >= job['expected'] and not job.get('pending_group_clicks'):
                 break
+        self.store.set_source_entries(job['id'], [source_entry(m, i) for i, m in enumerate(plan, 1)])
         # Inspect all batches first so original/native entries arrive before
         # attachment duplicates. This stores metadata only, not media bytes.
         plan.sort(key=lambda m: bool(getattr(getattr(m, 'media', None), 'video', False)), reverse=True)

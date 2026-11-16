@@ -30,10 +30,37 @@ def catalog_page(rows, page=1, page_callback_prefix='bridge_catalog'):
     return '\n\n'.join(body), InlineKeyboardMarkup(buttons)
 
 
+def folder_details(job, items):
+    title = job.get('title') or ('文件夹 ' + job['id'][:8])
+    counts = dict(photo=0, video=0, document=0)
+    for item in items:
+        kind = item.get('source_kind') or item['kind']
+        counts[kind if kind in counts else 'document'] += 1
+    sizes = [item.get('file_size') for item in items]
+    if any(size is None for size in sizes):
+        total = '未知'
+    else:
+        size = sum(sizes)
+        divisor, unit = (1_000_000_000, 'GB') if size >= 1_000_000_000 else (1_000_000, 'MB')
+        total = f'{size/divisor:.2f} {unit}'
+    # The source convention counts the folder information message as one
+    # message in addition to its media entries; navigation is not included.
+    return (f'📁 {title}\n\n📖 内容统计：\n'
+            f'　• 消息数：{len(items)+1} 条\n'
+            f'　• 图片数：{counts["photo"]} 张\n'
+            f'　• 视频数：{counts["video"]} 个\n'
+            f'　• 文档数：{counts["document"]} 个\n'
+            f'　• 总大小：{total}\n\n'
+            f'📅 创建时间：{job.get("source_created_at") or "未知"}\n'
+            f'✏️ 最后更新：{job.get("source_updated_at") or "未知"}\n\n'
+            '⏳ 开始发送内容...')
+
+
 async def send_file_page(bot, chat, job, items, page, send_one):
     pages = max(1, (len(items) + 9) // 10)
     page = max(1, min(page, pages))
     title = job.get('title') or ('文件夹 ' + job['id'][:8])
+    await bot.send_message(chat, folder_details(job, items), parse_mode=None)
     selected = items[(page-1)*10:page*10]
     documents = []
 

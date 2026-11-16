@@ -47,6 +47,24 @@ def folder_title(text):
     return match[1].strip()[:100] if match else ''
 
 
+def folder_metadata(text):
+    result = {}
+    for label, field in (('创建时间', 'source_created_at'), ('最后更新', 'source_updated_at')):
+        match = re.search(label + r'\s*[：:]\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})', text)
+        if match:
+            result[field] = match[1]
+    return result
+
+
+def source_entry(message, position):
+    file = getattr(message, 'file', None)
+    document = getattr(message, 'document', None)
+    mime = getattr(file, 'mime_type', '') or getattr(document, 'mime_type', '') or ''
+    kind = 'photo' if getattr(message, 'photo', None) else ('video' if mime.startswith('video/') else 'document')
+    return dict(source_chat=message.chat_id, source_message=message.id, position=position,
+                name=getattr(file, 'name', None) or '', size=getattr(file, 'size', None), kind=kind)
+
+
 class Store:
     def __init__(self, path):
         self.db = sqlite3.connect(path)
@@ -74,6 +92,11 @@ class Store:
                 canonical_chat INTEGER, canonical_message INTEGER,
                 PRIMARY KEY(job,source_chat,source_message)
             );
+            CREATE TABLE IF NOT EXISTS source_entries (
+                job TEXT, source_chat INTEGER, source_message INTEGER,
+                position INTEGER, name TEXT, size INTEGER, kind TEXT,
+                PRIMARY KEY(job,source_chat,source_message)
+            );
         ''')
         columns = {x['name'] for x in self.db.execute('PRAGMA table_info(files)')}
         if 'caption' not in columns:
@@ -95,6 +118,9 @@ class Store:
         for column in ('audit_requested', 'audit_public'):
             if column not in job_columns:
                 self.db.execute(f'ALTER TABLE jobs ADD COLUMN {column} INTEGER DEFAULT 0')
+        for column in ('source_created_at', 'source_updated_at'):
+            if column not in job_columns:
+                self.db.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT DEFAULT ''")
         self.db.execute("UPDATE jobs SET restart_pending=1 WHERE state IN ('running','queued','cooldown')")
         self.recoverable_jobs = [row['id'] for row in self.db.execute(
             "SELECT id FROM jobs WHERE restart_pending=1 AND state IN "
@@ -166,7 +192,32 @@ class Store:
 
     def files(self, job):
         return [dict(x) for x in self.db.execute(
-            'SELECT * FROM files WHERE job=? ORDER BY rowid', (job,))]
+            '''SELECT f.*, e.name AS source_name, e.size AS file_size, e.kind AS source_kind
+            FROM files f LEFT JOIN source_entries e ON e.job=f.job
+              AND e.source_chat=f.source_chat AND e.source_message=f.source_message
+            WHERE f.job=? ORDER BY COALESCE(
+              (SELECT MIN(p.position) FROM source_entries p WHERE p.job=f.job AND
+                ((p.source_chat=f.source_chat AND p.source_message=f.source_message) OR
+                  EXISTS(SELECT 1 FROM file_aliases a WHERE a.job=f.job
+                    AND a.source_chat=p.source_chat AND a.source_message=p.source_message
+                    AND a.canonical_chat=f.source_chat AND a.canonical_message=f.source_message))),
+              MIN(f.source_message, COALESCE((SELECT MIN(a.source_message) FROM file_aliases a
+                WHERE a.job=f.job AND a.canonical_chat=f.source_chat
+                  AND a.canonical_message=f.source_message), f.source_message))),
+              f.source_chat, f.source_message''', (job,))]
+
+    def set_source_entries(self, job, entries):
+        self.db.executemany('INSERT OR REPLACE INTO source_entries VALUES(?,?,?,?,?,?,?)',
+            [(job, e['source_chat'], e['source_message'], e['position'], e['name'], e['size'], e['kind'])
+             for e in entries])
+        self.db.commit()
+
+    def set_folder_metadata(self, job, metadata):
+        for field in ('source_created_at', 'source_updated_at'):
+            if metadata.get(field):
+                self.db.execute(f'UPDATE jobs SET {field}=? WHERE id=?', (metadata[field], job))
+        if metadata:
+            self.db.commit()
 
     def processed_count(self, job):
         return len(self.files(job)) + self.db.execute('SELECT count(*) FROM file_aliases WHERE job=?', (job,)).fetchone()[0]

@@ -6,11 +6,32 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, patch
-from core import Store
+from core import Store, folder_metadata
 from content_identity import analyze, preference
 
 
 class Index(unittest.TestCase):
+    def test_source_order_survives_priority_upload_and_alias_merge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)/'db'; store = Store(path); store.create('job', 7, 'link')
+            sources = [(20, 90), (30, 2), (40, 1)]
+            store.set_source_entries('job', [dict(source_chat=c, source_message=m, position=i,
+                name=f'item{i}', size=i*100, kind='document') for i,(c,m) in enumerate(sources,1)])
+            for n in (2, 0, 1):
+                store.add_file('job', sources[n], NS(chat_id=7, message_id=n+1), f'file{n}', 'document')
+            self.assertEqual([x['file_id'] for x in store.files('job')], ['file0','file1','file2'])
+            store.merge_alias('job', sources[1], sources[2], 'doc')
+            self.assertEqual([x['file_id'] for x in store.files('job')], ['file0','file2'])
+            self.assertEqual(store.files('job')[1]['file_size'], 300)
+            store.db.close(); store=Store(path)
+            self.assertEqual([x['file_id'] for x in store.files('job')], ['file0','file2'])
+            store.db.close()
+
+    def test_source_times_are_parsed_without_inventing_missing_dates(self):
+        self.assertEqual(folder_metadata('📅 创建时间：2026-11-17 00:35\n✏️ 最后更新：2026-11-17 00:36'),
+                         dict(source_created_at='2026-11-17 00:35',source_updated_at='2026-11-17 00:36'))
+        self.assertEqual(folder_metadata('时间未知'), {})
+
     def test_aliases_preserve_source_counts_and_survive_canonical_replacement(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)/'index.sqlite3'
