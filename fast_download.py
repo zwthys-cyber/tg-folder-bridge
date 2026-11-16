@@ -2,6 +2,7 @@
 import asyncio
 import time
 from contextlib import asynccontextmanager
+from transfer_metrics import TransferMeter
 
 
 class LiveLimiter:
@@ -39,10 +40,17 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
 
     async def standard(mode='sdk'):
         stats.update(mode=mode, workers=1, parts=0, wait_seconds=0.0)
+        meter = TransferMeter(stats, size, transport=mode)
         kwargs = dict(file=stream)
-        if progress is not None:
-            kwargs['progress_callback'] = progress
-        await client.download_media(message, **kwargs)
+        def callback(current, total):
+            meter.update(current)
+            if progress is not None:
+                progress(current, total)
+        kwargs['progress_callback'] = callback
+        try:
+            await client.download_media(message, **kwargs)
+        finally:
+            meter.finish()
 
     if not parallel:
         await standard()
@@ -53,6 +61,7 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
     limiter = LiveLimiter(worker_limit or (lambda: workers), pool)
     completed = 0
     stats.update(mode='parallel', workers=limiter.limit(), parts=0, wait_seconds=0.0)
+    meter = TransferMeter(stats, size, transport='sdk_ranges')
 
     async def download_range(index):
         nonlocal completed
@@ -82,6 +91,7 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
                 stream.seek(offset)
                 stream.write(data)
                 completed += len(data)
+                meter.update(completed, time.monotonic()-began)
                 if progress is not None:
                     progress(completed, size)
                 offset += stride
@@ -107,3 +117,6 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
         stream.seek(0)
         stream.truncate(0)
         await standard(mode='sdk_fallback')
+    finally:
+        if stats.get('mode') == 'parallel':
+            meter.finish()

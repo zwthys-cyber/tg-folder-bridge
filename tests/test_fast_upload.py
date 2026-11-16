@@ -16,8 +16,11 @@ class Upload(unittest.IsolatedAsyncioTestCase):
             client = NS(upload_file=AsyncMock(return_value='handle'))
             callback = Mock()
             self.assertEqual(await upload_file(client, path, callback), 'handle')
-            client.upload_file.assert_awaited_once_with(str(path), part_size_kb=512,
-                                                       progress_callback=callback)
+            client.upload_file.assert_awaited_once()
+            self.assertEqual(client.upload_file.call_args.args, (str(path),))
+            self.assertEqual(client.upload_file.call_args.kwargs['part_size_kb'], 512)
+            client.upload_file.call_args.kwargs['progress_callback'](5, 5)
+            callback.assert_called_once_with(5, 5)
 
     async def test_large_upload_is_bounded_and_complete(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -67,6 +70,29 @@ class Upload(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(RuntimeError):
                 await upload_file(send, path, Mock(), workers=3)
             self.assertEqual(active, 0)
+
+    async def test_dedicated_transport_preserves_every_part_and_records_metrics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)/'large.bin'
+            data = b'a'*(11*1024**2+123)
+            path.write_bytes(data)
+            parts = {}
+            async def send(request):
+                await asyncio.sleep(0)
+                parts[request.file_part] = request.bytes
+                return True
+            transport = NS(count=2, prepare=AsyncMock(), send=send)
+            client = AsyncMock(side_effect=AssertionError('control connection used'))
+            stats = {}
+            result = await upload_file(client, path, Mock(), workers=8,
+                                       stats=stats, transport=transport)
+            self.assertEqual(b''.join(parts[n] for n in sorted(parts)), data)
+            self.assertEqual(result.parts, len(parts))
+            self.assertEqual(stats['bytes'], len(data))
+            self.assertEqual(stats['transport'], 'dedicated')
+            self.assertEqual(stats['connections'], 2)
+            self.assertGreater(stats['average_mib'], 0)
+            client.assert_not_awaited()
 
     async def test_live_increase_changes_existing_upload_without_restarting_it(self):
         with tempfile.TemporaryDirectory() as tmp:

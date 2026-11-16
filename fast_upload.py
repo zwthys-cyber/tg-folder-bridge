@@ -4,9 +4,11 @@ import secrets
 import time
 from pathlib import Path
 from telethon import functions, types
+from transfer_metrics import TransferMeter
 
 
-async def upload_file(client, path, progress, workers=8, worker_limit=None, stats=None):
+async def upload_file(client, path, progress, workers=8, worker_limit=None, stats=None,
+                      transport=None):
     path = Path(path)
     size = path.stat().st_size
     if not 1 <= workers <= 32:
@@ -14,7 +16,18 @@ async def upload_file(client, path, progress, workers=8, worker_limit=None, stat
     stats = stats if stats is not None else {}
     stats.update(workers=1, parts=0, wait_seconds=0.0)
     if size <= 10 * 1024**2 or workers == 1:
-        return await client.upload_file(str(path), part_size_kb=512, progress_callback=progress)
+        meter = TransferMeter(stats, size, transport='sdk')
+        def callback(current, total):
+            meter.update(current)
+            progress(current, total)
+        try:
+            return await client.upload_file(str(path), part_size_kb=512, progress_callback=callback)
+        finally:
+            meter.finish()
+    if transport:
+        await transport.prepare()
+    meter = TransferMeter(stats, size, transport.count if transport else 1,
+                          'dedicated' if transport else 'control')
     chunk_size = 512 * 1024
     parts = (size + chunk_size - 1) // chunk_size
     file_id = secrets.randbits(63)
@@ -24,13 +37,14 @@ async def upload_file(client, path, progress, workers=8, worker_limit=None, stat
     async def send(part, data):
         nonlocal completed
         began = time.monotonic()
-        result = await client(functions.upload.SaveBigFilePartRequest(
+        result = await (transport.send if transport else client)(functions.upload.SaveBigFilePartRequest(
             file_id=file_id, file_part=part, file_total_parts=parts, bytes=data))
         if not result:
             raise RuntimeError('Telegram did not accept an upload part')
         stats['parts'] += 1
         stats['wait_seconds'] += time.monotonic() - began
         completed += len(data)
+        meter.update(completed, time.monotonic()-began)
         progress(completed, size)
 
     try:
@@ -54,4 +68,6 @@ async def upload_file(client, path, progress, workers=8, worker_limit=None, stat
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
         raise
+    finally:
+        meter.finish()
     return types.InputFileBig(id=file_id, parts=parts, name=path.name)

@@ -20,6 +20,7 @@ from catalog_ui import catalog_page, send_file_page
 import transfer_settings
 from transport_recovery import Cooldown, error_detail, rate_wait
 from adaptive_speed import AdaptiveSpeed
+from upload_transport import UploadTransport
 
 
 class Bridge:
@@ -51,6 +52,8 @@ class Bridge:
         self.download_workers, self.upload_workers = transfer_settings.load(
             self.settings_file, self.download_workers, self.upload_workers)
         self.automatic_speed = transfer_settings.automatic(self.settings_file)
+        self.upload_connections = transfer_settings.connections(self.settings_file)
+        self.upload_transport = None
         self.tuners = dict(下载=AdaptiveSpeed(self.download_workers),
                           上传=AdaptiveSpeed(self.upload_workers))
         self.cooldown = Cooldown(root / 'rate-limit.json')
@@ -66,7 +69,8 @@ class Bridge:
                 int(float(os.getenv('MIN_FREE_DISK_GB', '10')) * 1024**3))
         self.store = Store(root / 'index.sqlite3')
         self.client = TelegramClient(str(root / 'relay'), int(os.environ['API_ID']),
-                                     os.environ['API_HASH'])
+                                     os.environ['API_HASH'], flood_sleep_threshold=0,
+                                     raise_last_call_error=True)
         self.jobs = asyncio.Queue(maxsize=20)
         self.active = None
         self.pending = None
@@ -87,6 +91,8 @@ class Bridge:
         app.add_handler(CommandHandler('status', self.status), group=-100)
         app.add_handler(CommandHandler('resume', self.resume), group=-100)
         app.add_handler(CommandHandler('speed', self.speed), group=-100)
+        app.add_handler(CommandHandler('transport', self.transport_command), group=-100)
+        app.add_handler(CommandHandler('diagnostics', self.diagnostics), group=-100)
         app.add_handler(CallbackQueryHandler(self.original, pattern=r'^bridge_original:'), group=-100)
         app.add_handler(CallbackQueryHandler(self.catalog_callback, pattern=r'^bridge_(catalog|open|search):'), group=-100)
         app.add_handler(MessageHandler(filters.Regex(r'^https://t\.me/\w+\?start='),
@@ -114,6 +120,32 @@ class Bridge:
         self.client.add_event_handler(self.source_message, events.NewMessage(incoming=True))
         self.client.add_event_handler(self.source_message, events.MessageEdited(incoming=True))
         self.worker = asyncio.create_task(self.work())
+        self.resume_after_upgrade()
+
+    def resume_after_upgrade(self):
+        # Deployment can request one-time continuation without a second poller
+        # or logging into the relay session from another running process.
+        import json
+        request_file = self.settings_file.parent / 'resume-once.json'
+        if request_file.exists():
+            try:
+                requests = json.loads(request_file.read_text())
+                if (not isinstance(requests, list) or len(requests) > 20
+                        or any(not isinstance(job, str) for job in requests)):
+                    raise ValueError
+            except (ValueError, OSError):
+                print('升级续传请求无效，请检查 resume-once.json；服务继续运行。', flush=True)
+                return
+            if self.transfer_mode != 'download_upload':
+                print('仅下载上传模式支持升级后自动续传。', flush=True)
+                return
+            for job_id in requests:
+                row = self.store.get(job_id)
+                if (row and row['owner'] in self.owners and row['state'] == 'interrupted'
+                        and not self.jobs.full()):
+                    self.store.update(job_id, 'queued', row['expected'], '升级后继续任务。')
+                    self.jobs.put_nowait(job_id)
+            request_file.unlink()
 
     async def connect_user(self):
         await self.client.connect()
@@ -138,6 +170,8 @@ class Bridge:
                     BotCommand('folders', '查看导入任务'), BotCommand('status', '查看传输进度'),
                     BotCommand('resume', '继续导入任务'), BotCommand('add', '收录搜索资源'),
                     BotCommand('speed', '调整上传下载并发'),
+                    BotCommand('transport', '设置上传连接数'),
+                    BotCommand('diagnostics', '查看实测传输记录'),
                     BotCommand('delete', '删除搜索资源')], scope=BotCommandScopeChat(owner))
             except BadRequest:
                 pass  # This owner may not have opened the bot yet.
@@ -218,6 +252,7 @@ class Bridge:
                 await self.worker
         if self.active:
             self.store.update(self.active['id'], 'interrupted', self.active['expected'])
+        await self.close_upload_transport()
         await self.client.disconnect()
         self.store.db.close()
         if self.spool:
@@ -328,6 +363,58 @@ class Bridge:
         if self.cooldown.remaining():
             await update.message.reply_text(f'当前连接仍需冷却约 {self.cooldown.remaining():.0f} 秒，修改并发不会提前解除冷却。')
         raise ApplicationHandlerStop
+
+    async def transport_command(self, update, context):
+        if update.effective_chat.type != 'private' or update.effective_user.id not in self.owners:
+            raise ApplicationHandlerStop
+        if context.args:
+            try:
+                if len(context.args) != 1:
+                    raise ValueError
+                count = int(context.args[0])
+                if not 1 <= count <= 4:
+                    raise ValueError
+                transfer_settings.save(self.settings_file, self.download_workers,
+                    self.upload_workers, self.automatic_speed, count)
+                self.upload_connections = count
+            except ValueError:
+                await update.message.reply_text('用法：/transport 2；支持 1–4，1 为原上传通道。')
+                raise ApplicationHandlerStop
+        await update.message.reply_text(
+            f'大文件上传连接：{self.upload_connections}。\n'
+            '1 为原通道；2–4 为独立媒体连接，设置从下一个文件生效。\n'
+            '分块总并发仍由 /speed 控制；/diagnostics 查看实测记录。')
+        raise ApplicationHandlerStop
+
+    async def diagnostics(self, update, context):
+        if update.effective_chat.type != 'private' or update.effective_user.id not in self.owners:
+            raise ApplicationHandlerStop
+        lines = [f'上传连接设置：{self.upload_connections}；独立连接仅用于大文件。']
+        for row in self.store.transfer_history(8):
+            m = row['payload']
+            lines.append(f"{row['at']} UTC · {row['phase']} · {row['job']}\n"
+                f"{m.get('bytes', 0)/1024**2:.1f} MiB / {m.get('seconds', 0):.1f} 秒 · "
+                f"{m.get('average_mib', 0):.2f} MiB/s\n"
+                f"{m.get('transport', '?')} · {m.get('connections', 1)} 连接 · "
+                f"p95 {m.get('p95_ms', 0):.0f} ms · {m.get('error') or '阶段完成'}")
+        if len(lines) == 1:
+            lines.append('还没有新版本的传输记录，当前文件完成后可查看。')
+        await update.message.reply_text('\n\n'.join(lines))
+        raise ApplicationHandlerStop
+
+    async def close_upload_transport(self):
+        if self.upload_transport:
+            await self.upload_transport.close()
+            self.upload_transport = None
+
+    async def get_upload_transport(self):
+        if self.upload_transport and self.upload_transport.count != self.upload_connections:
+            await self.close_upload_transport()
+        if self.upload_connections == 1:
+            return None
+        if self.upload_transport is None:
+            self.upload_transport = UploadTransport(self.client, self.upload_connections)
+        return self.upload_transport
 
     async def resume(self, update, context):
         if update.effective_chat.type != 'private' or update.effective_user.id not in self.owners:
@@ -449,7 +536,8 @@ class Bridge:
             self.download_workers = max(1, min(8, self.download_workers // 2))
             self.upload_workers = max(1, min(8, self.upload_workers // 2))
             transfer_settings.save(self.settings_file, self.download_workers, self.upload_workers,
-                                   self.automatic_speed)
+                                   self.automatic_speed, 1)
+            self.upload_connections = 1
             self.tuners['下载'].configure(self.download_workers)
             self.tuners['上传'].configure(self.upload_workers)
             self.cooldown.defer(wait, error_detail(error))
@@ -482,6 +570,7 @@ class Bridge:
                     raise exc
                 detail = error_detail(exc, job.get('phase', ''))
                 print(f"任务 {job['id']}：{detail}", flush=True)
+                await self.close_upload_transport()
                 await self.client.disconnect()
                 self.reconnect_required = True
                 if self.transfer_mode != 'download_upload' and self.blocked:
@@ -552,6 +641,21 @@ class Bridge:
         ceiling = self.download_workers if direction == '下载' else self.upload_workers
         return min(ceiling, self.tuners[direction].current) if self.automatic_speed else ceiling
 
+    @contextlib.asynccontextmanager
+    async def staged_download(self, message, job):
+        recorded = False
+        try:
+            async with self.spool.stage(self.client, message, progress=self.progress(job, '下载'),
+                    workers=self.download_workers, stats=job['download_stats'],
+                    worker_limit=lambda: self.worker_limit('下载')) as path:
+                self.store.record_transfer(job['id'], '下载', job['download_stats'])
+                recorded = True
+                yield path
+        except BaseException as exc:
+            if not recorded:
+                self.store.record_transfer(job['id'], '下载', job['download_stats'], error_detail(exc, '下载'))
+            raise
+
     def progress(self, job, label):
         started = time.monotonic()
         last_update = -float('inf')
@@ -587,6 +691,9 @@ class Bridge:
                     detail += f"；分块平均等待 {1000 * metrics['wait_seconds'] / metrics['parts']:.0f} ms"
             if self.automatic_speed and metrics.get('parts'):
                 detail += f'\n自动调速：{self.tuners[direction].note}；下一批并发 {self.worker_limit(direction)} 路'
+            if metrics.get('recent_seconds', 0) > 0:
+                detail += (f"\n近期 {metrics['recent_seconds']:.1f} 秒：{metrics.get('recent_mib', 0):.2f} MiB/s"
+                           f"；{metrics.get('connections', 1)} 条连接（{metrics.get('transport', 'sdk')}）")
             self.store.update(job['id'], 'running', job['expected'], detail)
         return callback
 
@@ -596,9 +703,7 @@ class Bridge:
             self.store.update(job['id'], 'running', job['expected'], '正在下载一个文件到临时目录。')
             job['download_stats'] = {}
             self.tuners['下载'].begin()
-            async with self.spool.stage(self.client, message, progress=self.progress(job, '下载'),
-                                        workers=self.download_workers, stats=job['download_stats'],
-                                        worker_limit=lambda: self.worker_limit('下载')) as path:
+            async with self.staged_download(message, job) as path:
                 preview = None
                 thumbnail = None
                 if self.heic_previews:
@@ -649,11 +754,20 @@ class Bridge:
             else:
                 self.active['upload_stats'] = {}
                 self.tuners['上传'].begin()
-                uploaded = await upload_file(
-                    self.client, upload_path,
-                    progress=self.progress(self.active, '上传预览' if preview else '上传'),
-                    workers=self.upload_workers, worker_limit=lambda: self.worker_limit('上传'),
-                    stats=self.active['upload_stats'])
+                failure = ''
+                try:
+                    uploaded = await upload_file(
+                        self.client, upload_path,
+                        progress=self.progress(self.active, '上传预览' if preview else '上传'),
+                        workers=self.upload_workers, worker_limit=lambda: self.worker_limit('上传'),
+                        stats=self.active['upload_stats'], transport=await self.get_upload_transport())
+                except BaseException as exc:
+                    failure = error_detail(exc, '上传')
+                    await self.close_upload_transport()
+                    raise
+                finally:
+                    self.store.record_transfer(self.active['id'], '上传',
+                        self.active['upload_stats'], failure)
                 self.store.update(self.active['id'], 'running', self.active['expected'], '上传完成，等待机器人确认收件。')
                 self.active['phase'] = '发送媒体消息'
                 await self.client.send_file(

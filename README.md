@@ -6,6 +6,8 @@
 
 支持上传、下载独立自动调速：发送 `/speed auto 32 32`，从最多 8 路起步，根据实际吞吐逐步试探更高并发，无明显收益则回退；两项数字是上限。原有 `/speed 8 8` 仍为固定并发模式，模式与上限均持久保存。完整说明见 [SPEED.md](SPEED.md)。
 
+新增独立上传连接 `/transport 2`、阶段测速记录 `/diagnostics` 和部署主机 A/B 测试工具。默认仍使用原通道；真实测速有收益后再切换。连接生命周期、备份回退和验收步骤见 [OPERATIONS.md](OPERATIONS.md)。
+
 实际部署已遇到 32 路触发传输层 HTTP 429；现在默认改为 8 路，仍允许管理员在线调到 32 路，但触发限流会自动降低并发、保存冷却时间、重建连接并继续任务。修复与恢复步骤见 [RATE_LIMITS.md](RATE_LIMITS.md)。
 
 已部署用户更新与清空转存索引后重新导入，见 [UPGRADE_CATALOG.md](UPGRADE_CATALOG.md)。清空索引不删除 Telegram 聊天中的旧媒体。

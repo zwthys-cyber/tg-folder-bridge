@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from transfer_settings import automatic, load, save, validate
+from transfer_settings import automatic, connections, load, save, validate
 
 
 class Settings(unittest.TestCase):
@@ -28,3 +28,11 @@ class Settings(unittest.TestCase):
             self.assertEqual(load(path, 8, 8), (32, 24))
             save(path, 8, 8)
             self.assertFalse(automatic(path))
+
+    def test_speed_changes_preserve_connection_setting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'performance.json'
+            save(path, 8, 8, False, 2)
+            save(path, 32, 8, True)
+            self.assertEqual(connections(path), 2)
+            self.assertTrue(automatic(path))

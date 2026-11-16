@@ -26,16 +26,28 @@ def automatic(path):
     return path.exists() and json.loads(path.read_text()).get('automatic', False) is True
 
 
-def save(path, download, upload, automatic=False):
+def connections(path):
+    path = Path(path)
+    value = json.loads(path.read_text()).get('upload_connections', 1) if path.exists() else 1
+    if type(value) is not int or not 1 <= value <= 4:
+        raise ValueError('Upload connections must be 1–4')
+    return value
+
+
+def save(path, download, upload, automatic=False, upload_connections=None):
     validate(download, upload)
     path = Path(path)
+    if upload_connections is None:
+        upload_connections = connections(path)
+    if type(upload_connections) is not int or not 1 <= upload_connections <= 4:
+        raise ValueError('Upload connections must be 1–4')
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as output:
             temporary = Path(output.name)
             os.fchmod(output.fileno(), 0o600)
             json.dump(dict(download_workers=download, upload_workers=upload,
-                           automatic=automatic), output)
+                           automatic=automatic, upload_connections=upload_connections), output)
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)

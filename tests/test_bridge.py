@@ -394,6 +394,46 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
             await self.bridge.speed(update, NS(args=['32', '32']))
         self.assertFalse(self.bridge.settings_file.exists())
 
+    async def test_transport_settings_require_owner_and_survive_speed_changes(self):
+        update = NS(effective_chat=NS(type='private'), effective_user=NS(id=999),
+                    message=NS(reply_text=AsyncMock()))
+        with self.assertRaises(ApplicationHandlerStop):
+            await self.bridge.transport_command(update, NS(args=['2']))
+        self.assertEqual(self.bridge.upload_connections, 1)
+        update.effective_user.id = 7
+        with self.assertRaises(ApplicationHandlerStop):
+            await self.bridge.transport_command(update, NS(args=['2']))
+        self.assertEqual(self.bridge.upload_connections, 2)
+        with self.assertRaises(ApplicationHandlerStop):
+            await self.bridge.speed(update, NS(args=['8', '8']))
+        import transfer_settings
+        self.assertEqual(transfer_settings.connections(self.bridge.settings_file), 2)
+
+    async def test_diagnostics_are_private_and_do_not_disclose_captions(self):
+        self.bridge.store.record_transfer('job', '上传', dict(bytes=100, caption='private caption'))
+        update = NS(effective_chat=NS(type='private'), effective_user=NS(id=999),
+                    message=NS(reply_text=AsyncMock()))
+        with self.assertRaises(ApplicationHandlerStop):
+            await self.bridge.diagnostics(update, NS(args=[]))
+        update.message.reply_text.assert_not_awaited()
+        update.effective_user.id = 7
+        with self.assertRaises(ApplicationHandlerStop):
+            await self.bridge.diagnostics(update, NS(args=[]))
+        text = update.message.reply_text.call_args.args[0]
+        self.assertIn('上传', text)
+        self.assertNotIn('private caption', text)
+
+    async def test_deployment_resume_is_one_time_deduplicated_and_retains_total(self):
+        self.bridge.transfer_mode = 'download_upload'
+        self.bridge.store.update('job', 'interrupted', 63)
+        request = self.bridge.settings_file.parent/'resume-once.json'
+        request.write_text('["job", "job", "unknown"]')
+        self.bridge.resume_after_upgrade()
+        self.assertEqual(self.bridge.jobs.qsize(), 1)
+        self.assertEqual(self.bridge.jobs.get_nowait(), 'job')
+        self.assertEqual(self.bridge.store.get('job')['expected'], 63)
+        self.assertFalse(request.exists())
+
     async def test_auto_command_sets_independent_bounded_controllers_and_persists(self):
         from transfer_settings import automatic
         update = NS(effective_chat=NS(type='private'), effective_user=NS(id=7),

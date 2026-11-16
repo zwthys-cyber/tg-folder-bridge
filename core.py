@@ -61,6 +61,10 @@ class Store:
                 chat INTEGER, message INTEGER, file_id TEXT, kind TEXT,
                 PRIMARY KEY(job, source_chat, source_message)
             );
+            CREATE TABLE IF NOT EXISTS transfer_metrics (
+                id INTEGER PRIMARY KEY, at TEXT DEFAULT CURRENT_TIMESTAMP,
+                job TEXT, phase TEXT, payload TEXT
+            );
         ''')
         columns = {x['name'] for x in self.db.execute('PRAGMA table_info(files)')}
         if 'caption' not in columns:
@@ -81,6 +85,23 @@ class Store:
         self.db.execute('INSERT INTO jobs(id,owner,link,state) VALUES(?,?,?,?)',
                         (job, owner, link, 'queued'))
         self.db.commit()
+
+    def record_transfer(self, job, phase, stats, error=''):
+        import json
+        keys = ('bytes', 'total', 'seconds', 'average_mib', 'recent_mib',
+                'recent_seconds', 'connections', 'transport', 'workers', 'p50_ms', 'p95_ms')
+        payload = {key: stats[key] for key in keys if key in stats}
+        payload['error'] = error
+        self.db.execute('INSERT INTO transfer_metrics(job,phase,payload) VALUES(?,?,?)',
+                        (job, phase, json.dumps(payload)))
+        self.db.execute('DELETE FROM transfer_metrics WHERE id NOT IN '
+                        '(SELECT id FROM transfer_metrics ORDER BY id DESC LIMIT 500)')
+        self.db.commit()
+
+    def transfer_history(self, limit=10):
+        import json
+        return [dict(row, payload=json.loads(row['payload'])) for row in self.db.execute(
+            'SELECT * FROM transfer_metrics ORDER BY id DESC LIMIT ?', (limit,))]
 
     def update(self, job, state, expected=None, detail=''):
         self.db.execute('UPDATE jobs SET state=?,expected=?,detail=? WHERE id=?',
