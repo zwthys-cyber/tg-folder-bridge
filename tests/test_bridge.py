@@ -72,6 +72,24 @@ class Parsing(unittest.TestCase):
 
 
 class CloudTransfer(unittest.IsolatedAsyncioTestCase):
+    async def test_foreign_view_session_and_unavailable_favorite_are_rejected(self):
+        progress=self.bridge.store.start_view(7,'job')
+        query=NS(data=f'bridge_page:{progress.id}:2',answer=AsyncMock(),message=NS(photo=None))
+        update=NS(callback_query=query,effective_chat=NS(type='private',id=8),effective_user=NS(id=8))
+        with patch('bridge.send_file_page',new_callable=AsyncMock) as send_page:
+            with self.assertRaises(ApplicationHandlerStop):
+                await self.bridge.catalog_callback(update,NS(bot=NS()))
+            send_page.assert_not_awaited()
+        query.data='bridge_fav:job'
+        with self.assertRaises(ApplicationHandlerStop):
+            await self.bridge.catalog_callback(update,NS(bot=NS()))
+        self.assertFalse(self.bridge.store.is_favorite(8,'job'))
+        self.bridge.store.update('job','complete',0)
+        with self.assertRaises(ApplicationHandlerStop):
+            await self.bridge.catalog_callback(update,NS(bot=NS()))
+        self.assertTrue(self.bridge.store.is_favorite(8,'job'))
+        self.assertFalse(self.bridge.store.is_favorite(7,'job'))
+
     async def test_open_shows_card_view_sends_files_and_photo_back_returns_catalog(self):
         self.bridge.store.update('job','complete',0)
         query=NS(data='bridge_open:job:1',answer=AsyncMock(),message=NS(photo=None),edit_message_text=AsyncMock())

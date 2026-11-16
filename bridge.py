@@ -228,7 +228,7 @@ class Bridge:
     async def help_command(self, update, context):
         if update.effective_chat.type != 'private':
             raise ApplicationHandlerStop
-        text = '发送 /start 查看文件夹列表，点击编号打开文件夹。\n文件按组显示缩略图、文件名和大小。\n直接发送关键词搜索文件夹名称，也可搜索原收录资源。'
+        text = '发送 /start 查看文件夹列表，点击编号打开文件夹。\n文件按组显示缩略图、文件名和大小。\n发送 /favorites 查看我的收藏。\n直接发送关键词搜索文件夹名称，也可搜索原收录资源。'
         if update.effective_user.id in self.owners:
             text += '\n\n管理员：\n/fetch 分享链接\n/folders 导入任务\n/status 任务编号\n/resume 任务编号\n/speed 下载并发 上传并发\n/add 标题 | 链接 | 关键词\n/delete 编号'
         await update.message.reply_text(text)
@@ -321,7 +321,10 @@ class Bridge:
                     await self.show_folder_card(context.bot, update.effective_chat.id, job, items)
                 else:
                     if progress is None:
-                        progress=self.store.start_view(update.effective_user.id,job['id'])
+                        old_text=getattr(query.message,'text',None) or ''
+                        legacy_navigation=(parts[0]=='bridge_view' and
+                            (page>1 or ('共 ' in old_text and ' 组）' in old_text)))
+                        progress=self.store.start_view(update.effective_user.id,job['id'],details_sent=legacy_navigation)
                     await send_file_page(context.bot, update.effective_chat.id, job,
                                          items, page, self.send_stored,progress=progress,
                                          favorite=self.store.is_favorite(update.effective_user.id,job['id']))

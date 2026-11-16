@@ -281,9 +281,10 @@ class Store:
             WHERE v.owner=? AND (j.state='complete' OR j.audit_public=1 OR j.owner=?)
             GROUP BY j.id ORDER BY j.rowid DESC''', (owner,owner))]
 
-    def start_view(self, owner, job):
+    def start_view(self, owner, job, details_sent=False):
         sid=secrets.token_hex(6)
-        self.db.execute('INSERT INTO view_sessions(id,owner,job) VALUES(?,?,?)', (sid,owner,job))
+        self.db.execute('INSERT INTO view_sessions(id,owner,job,detail_sent) VALUES(?,?,?,?)',
+                        (sid,owner,job,int(details_sent)))
         self.db.commit()
         return self.view(sid,owner)
 
