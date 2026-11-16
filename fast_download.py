@@ -46,7 +46,8 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
             meter.update(current)
             if progress is not None:
                 progress(current, total)
-        kwargs['progress_callback'] = callback
+        if progress is not None:
+            kwargs['progress_callback'] = callback
         try:
             await client.download_media(message, **kwargs)
         finally:
