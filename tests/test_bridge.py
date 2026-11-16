@@ -525,11 +525,24 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         await self.bridge.collect_with_recovery('link', self.job)
         self.assertEqual(operations, ['job', 'job'])
         self.assertGreater(gates[1], 100)
-        self.assertEqual((self.bridge.download_workers, self.bridge.upload_workers), (8, 8))
+        self.assertEqual((self.bridge.download_workers, self.bridge.upload_workers), (32, 8))
         self.bridge.client.disconnect.assert_awaited_once()
         self.bridge.connect_user.assert_awaited_once()
         self.assertFalse(self.bridge.blocked)
         self.assertGreater(Cooldown(self.bridge.cooldown.path).remaining(), 100)
+
+    async def test_download_429_does_not_degrade_healthy_upload_settings(self):
+        from telethon.errors import InvalidBufferError
+        self.bridge.download_workers, self.bridge.upload_workers = 32, 8
+        self.bridge.upload_connections = 2
+        self.job['phase'] = '下载'
+        self.bridge.defer_transport(InvalidBufferError((-429).to_bytes(4, 'little', signed=True)), 0)
+        self.assertEqual(self.bridge.download_workers, 8)
+        self.assertEqual(self.bridge.upload_workers, 8)
+        self.assertEqual(self.bridge.upload_connections, 2)
+        import transfer_settings
+        self.assertEqual(transfer_settings.connections(self.bridge.settings_file), 2)
+        self.assertGreater(self.bridge.cooldown.remaining(), 100)
 
     async def test_broken_connection_is_rebuilt_before_replaying(self):
         self.bridge.transfer_mode = 'download_upload'

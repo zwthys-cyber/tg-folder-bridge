@@ -22,7 +22,7 @@ from transport_recovery import Cooldown, error_detail, rate_wait
 from adaptive_speed import AdaptiveSpeed
 from upload_transport import UploadTransport
 
-VERSION = '0.3.0'
+VERSION = '0.3.1'
 
 
 class Bridge:
@@ -379,6 +379,7 @@ class Bridge:
             f'下载上限 {self.download_workers} 路；上传上限 {self.upload_workers} 路。\n' +
             ('设置已保存。' if context.args else '调整：/speed 下载并发 上传并发（1–32）。') +
             ('从当前安全并发分别采样，吞吐提升才保留更高并发，收益不足自动回退。\n' if self.automatic_speed else '') +
+            ('自动探测最高 16 路；设置更高上限也不会自动试到 20–32 路。\n' if self.automatic_speed else '') +
             '进行中的并发传输会在后续分块采用新上限，已发出的请求正常完成。\n'
             '小文件和兼容回退仍使用单路；并发越高不保证越快。')
         if self.cooldown.remaining():
@@ -558,13 +559,16 @@ class Bridge:
         if wait is None and not connection:
             return False
         if wait is not None:
-            self.download_workers = max(1, min(8, self.download_workers // 2))
-            self.upload_workers = max(1, min(8, self.upload_workers // 2))
+            phase = (self.active or {}).get('phase', '')
+            if phase != '上传':
+                self.download_workers = max(1, min(8, self.download_workers // 2))
+                self.tuners['下载'].configure(self.download_workers)
+            if phase != '下载':
+                self.upload_workers = max(1, min(8, self.upload_workers // 2))
+                self.upload_connections = 1
+                self.tuners['上传'].configure(self.upload_workers)
             transfer_settings.save(self.settings_file, self.download_workers, self.upload_workers,
-                                   self.automatic_speed, 1)
-            self.upload_connections = 1
-            self.tuners['下载'].configure(self.download_workers)
-            self.tuners['上传'].configure(self.upload_workers)
+                                   self.automatic_speed, self.upload_connections)
             self.cooldown.defer(wait, error_detail(error))
         elif not self.cooldown.remaining():
             self.cooldown.defer(5 * 2**attempt, error_detail(error))
@@ -591,6 +595,7 @@ class Bridge:
                 button_error = job.get('button_error')
                 if button_error and rate_wait(button_error, attempt) is not None:
                     exc = button_error
+                    job['phase'] = '源机器人翻组'
                 if not self.defer_transport(exc, attempt):
                     raise exc
                 detail = error_detail(exc, job.get('phase', ''))

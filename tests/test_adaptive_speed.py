@@ -63,3 +63,13 @@ class Adaptive(unittest.TestCase):
         self.now += 8
         self.tuner.observe(10**9 + 800, 10**12, 10064)
         self.assertEqual(self.tuner.samples, [100])
+
+    def test_automatic_probes_never_reach_observed_429_range(self):
+        rate = 100
+        for _ in range(12):
+            self.sample(rate); self.sample(rate)
+            rate *= 2
+            self.assertLessEqual(self.tuner.current, 16)
+        self.assertEqual(self.tuner.current, 16)
+        self.tuner.configure(32)
+        self.assertLessEqual(self.tuner.ceiling, 16)

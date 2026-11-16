@@ -5,11 +5,14 @@ import time
 class AdaptiveSpeed:
     window = 8.0
     minimum_parts = 32
+    # The production deployment hit transport 429 at 20 download requests.
+    # Manual concurrency is separate; automatic exploration stays below that.
+    maximum_probe = 16
 
     def __init__(self, ceiling, clock=time.monotonic):
         self.clock = clock
         self.current = min(8, ceiling)
-        self.ceiling = ceiling
+        self.ceiling = min(ceiling, self.maximum_probe)
         self.hold_until = 0
         self.begin()
 
@@ -28,8 +31,8 @@ class AdaptiveSpeed:
         if self.trial:
             self.current = self.trial[0]
         self.trial = None
-        self.ceiling = ceiling
-        self.current = min(self.current, ceiling)
+        self.ceiling = min(ceiling, self.maximum_probe)
+        self.current = min(self.current, self.ceiling)
         self.begin()
 
     def observe(self, current, total, parts):
