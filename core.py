@@ -78,18 +78,25 @@ class Store:
         job_columns = {x['name'] for x in self.db.execute('PRAGMA table_info(jobs)')}
         if 'title' not in job_columns:
             self.db.execute("ALTER TABLE jobs ADD COLUMN title TEXT DEFAULT ''")
+        if 'restart_pending' not in job_columns:
+            self.db.execute('ALTER TABLE jobs ADD COLUMN restart_pending INTEGER DEFAULT 0')
+        self.db.execute("UPDATE jobs SET restart_pending=1 WHERE state IN ('running','queued','cooldown')")
+        self.recoverable_jobs = [row['id'] for row in self.db.execute(
+            "SELECT id FROM jobs WHERE restart_pending=1 AND state IN "
+            "('running','queued','cooldown','interrupted') ORDER BY rowid")]
         self.db.execute("UPDATE jobs SET state='interrupted' WHERE state IN ('queued','running','cooldown')")
         self.db.commit()
 
     def create(self, job, owner, link):
-        self.db.execute('INSERT INTO jobs(id,owner,link,state) VALUES(?,?,?,?)',
+        self.db.execute('INSERT INTO jobs(id,owner,link,state,restart_pending) VALUES(?,?,?,?,1)',
                         (job, owner, link, 'queued'))
         self.db.commit()
 
     def record_transfer(self, job, phase, stats, error=''):
         import json
         keys = ('bytes', 'total', 'seconds', 'average_mib', 'recent_mib',
-                'recent_seconds', 'connections', 'transport', 'workers', 'p50_ms', 'p95_ms')
+                'recent_seconds', 'connections', 'transport', 'workers', 'p50_ms', 'p95_ms',
+                'retries', 'scheduler')
         payload = {key: stats[key] for key in keys if key in stats}
         payload['error'] = error
         self.db.execute('INSERT INTO transfer_metrics(job,phase,payload) VALUES(?,?,?)',
@@ -104,8 +111,10 @@ class Store:
             'SELECT * FROM transfer_metrics ORDER BY id DESC LIMIT ?', (limit,))]
 
     def update(self, job, state, expected=None, detail=''):
-        self.db.execute('UPDATE jobs SET state=?,expected=?,detail=? WHERE id=?',
-                        (state, expected, detail, job))
+        self.db.execute('UPDATE jobs SET state=?,expected=?,detail=?,restart_pending=CASE '
+                        "WHEN ? IN ('queued','running','cooldown') THEN 1 "
+                        "WHEN ?='interrupted' THEN restart_pending ELSE 0 END WHERE id=?",
+                        (state, expected, detail, state, state, job))
         self.db.commit()
 
     def get(self, job):

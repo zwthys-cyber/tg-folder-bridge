@@ -13,6 +13,21 @@ from core import Store, media_count, parse_link
 
 
 class Parsing(unittest.TestCase):
+    def test_restart_marker_survives_graceful_stop_but_not_completion_or_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)/'index.sqlite3'
+            store = Store(path)
+            for name, state in [('running', 'running'), ('stopped', 'interrupted'),
+                                ('done', 'complete'), ('failed', 'partial')]:
+                store.create(name, 7, 'link')
+                store.update(name, state, 63)
+            store.db.close()
+            store = Store(path)
+            self.assertEqual(set(store.recoverable_jobs), {'running', 'stopped'})
+            self.assertEqual(store.get('running')['state'], 'interrupted')
+            self.assertEqual(store.get('stopped')['expected'], 63)
+            self.assertEqual(store.get('done')['restart_pending'], 0)
+            store.db.close()
     def test_link_and_target_allowlist(self):
         self.assertEqual(parse_link('https://t.me/epan?start=s_abc', {'epan'}), ('epan', 's_abc'))
         for url in ('https://t.me/other_bot?start=x', 'https://evil.test/epan?start=x',
@@ -556,4 +571,31 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
                     message=NS(reply_text=AsyncMock()))
         with self.assertRaises(ApplicationHandlerStop):
             await self.bridge.resume(update, NS(args=['job']))
+        self.assertTrue(self.bridge.jobs.empty())
+
+    async def test_restore_only_eligible_owned_jobs_and_deduplicates_requests(self):
+        self.bridge.transfer_mode = 'download_upload'
+        self.bridge.store.update('job', 'running', 63)
+        self.bridge.store.create('other', 999, 'link')
+        self.bridge.store.create('finished', 7, 'link')
+        self.bridge.store.update('finished', 'complete', 1)
+        self.bridge.store.db.close()
+        self.bridge.store = Store(Path(self.tmp.name)/'index.sqlite3')
+        await self.bridge.restore_jobs()
+        await self.bridge.restore_jobs()
+        self.assertEqual(self.bridge.jobs.qsize(), 1)
+        self.assertEqual(self.bridge.jobs.get_nowait(), 'job')
+        self.assertEqual(self.bridge.store.get('job')['expected'], 63)
+        self.assertEqual(self.bridge.store.get('other')['state'], 'interrupted')
+
+    async def test_automatic_restore_can_be_disabled_and_never_replays_forwards(self):
+        self.bridge.store.recoverable_jobs = ['job']
+        self.bridge.store.update('job', 'interrupted', 63)
+        self.bridge.transfer_mode = 'download_upload'
+        self.bridge.auto_resume = False
+        await self.bridge.restore_jobs()
+        self.assertTrue(self.bridge.jobs.empty())
+        self.bridge.auto_resume = True
+        self.bridge.transfer_mode = 'forward'
+        await self.bridge.restore_jobs()
         self.assertTrue(self.bridge.jobs.empty())

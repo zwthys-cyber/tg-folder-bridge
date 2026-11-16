@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 from telethon import types
 from fast_upload import upload_file
 
@@ -125,3 +125,83 @@ class Upload(unittest.IsolatedAsyncioTestCase):
             self.assertGreater(peak, 8)
             self.assertLessEqual(peak, 32)
             self.assertEqual(stats['workers'], 32)
+
+    async def test_reconnect_keeps_file_id_and_confirmed_parts_without_rereading_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)/'large.bin'
+            data = b'a'*(11*1024**2+123)
+            path.write_bytes(data)
+            accepted, calls, ids = {}, {}, set()
+            async def send(request):
+                n = request.file_part
+                calls[n] = calls.get(n, 0)+1
+                ids.add(request.file_id)
+                if n == 3 and calls[n] == 1:
+                    raise ConnectionError('temporary failure')
+                self.assertNotIn(n, accepted)
+                accepted[n] = request.bytes
+                return True
+            transport = NS(count=2, prepare=AsyncMock(), close=AsyncMock(), send=send)
+            stats, progress = {}, Mock()
+            with patch('fast_upload.asyncio.sleep', new=AsyncMock()):
+                result = await upload_file(None, path, progress, workers=8,
+                                           transport=transport, stats=stats)
+            self.assertEqual(len(ids), 1)
+            self.assertEqual(result.id, next(iter(ids)))
+            self.assertEqual(b''.join(accepted[n] for n in sorted(accepted)), data)
+            self.assertEqual(calls[3], 2)
+            self.assertTrue(all(n == 3 or count == 1 for n, count in calls.items()))
+            self.assertEqual(stats['bytes'], len(data))
+            self.assertEqual(stats['retries'], 1)
+            self.assertEqual(transport.prepare.await_count, 2)
+            values = [call.args[0] for call in progress.call_args_list]
+            self.assertEqual(values, sorted(values))
+
+    async def test_no_local_retry_on_429_or_flood_wait(self):
+        from telethon.errors import InvalidBufferError, FloodWaitError
+        for error in (InvalidBufferError((-429).to_bytes(4, 'little', signed=True)),
+                      FloodWaitError(request=None, capture=120)):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp)/'large.bin'; path.write_bytes(b'a'*(11*1024**2))
+                transport = NS(count=2, prepare=AsyncMock(), close=AsyncMock(),
+                               send=AsyncMock(side_effect=error))
+                with self.assertRaises(type(error)):
+                    await upload_file(None, path, Mock(), transport=transport)
+                self.assertEqual(transport.prepare.await_count, 1)
+                transport.close.assert_awaited()
+
+    async def test_simultaneous_429_takes_priority_over_retryable_disconnect(self):
+        from telethon.errors import InvalidBufferError
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)/'large.bin'; path.write_bytes(b'a'*(11*1024**2))
+            async def send(request):
+                if request.file_part == 0:
+                    raise ConnectionError()
+                if request.file_part == 1:
+                    raise InvalidBufferError((-429).to_bytes(4, 'little', signed=True))
+                return True
+            transport = NS(count=2, prepare=AsyncMock(), close=AsyncMock(), send=send)
+            with self.assertRaises(InvalidBufferError):
+                await upload_file(None, path, Mock(), transport=transport)
+            self.assertEqual(transport.prepare.await_count, 1)
+
+    async def test_outage_retries_are_bounded_and_source_changes_abort(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)/'large.bin'; path.write_bytes(b'a'*(11*1024**2))
+            transport = NS(count=2, prepare=AsyncMock(), close=AsyncMock(),
+                           send=AsyncMock(side_effect=ConnectionError()))
+            with patch('fast_upload.asyncio.sleep', new=AsyncMock()):
+                with self.assertRaises(ConnectionError):
+                    await upload_file(None, path, Mock(), transport=transport)
+            self.assertEqual(transport.prepare.await_count, 3)
+            async def change(request):
+                import os
+                st = path.stat()
+                os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns+1000000))
+                raise ConnectionError()
+            transport.prepare.reset_mock()
+            transport.send = change
+            with patch('fast_upload.asyncio.sleep', new=AsyncMock()):
+                with self.assertRaisesRegex(RuntimeError, 'source changed'):
+                    await upload_file(None, path, Mock(), transport=transport)
+            self.assertEqual(transport.prepare.await_count, 2)

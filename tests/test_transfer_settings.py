@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from transfer_settings import automatic, connections, load, save, validate
+from transfer_settings import automatic, connections, load, save, scheduler, validate
 
 
 class Settings(unittest.TestCase):
@@ -36,3 +36,14 @@ class Settings(unittest.TestCase):
             save(path, 32, 8, True)
             self.assertEqual(connections(path), 2)
             self.assertTrue(automatic(path))
+
+    def test_scheduler_is_explicit_and_preserved_across_speed_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)/'performance.json'
+            self.assertEqual(scheduler(path), 'round_robin')
+            save(path, 8, 8, False, 2, 'balanced')
+            save(path, 12, 8)
+            self.assertEqual(scheduler(path), 'balanced')
+            self.assertEqual(connections(path), 2)
+            with self.assertRaises(ValueError):
+                save(path, 8, 8, False, 2, 'unknown')

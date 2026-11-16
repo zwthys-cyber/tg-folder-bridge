@@ -111,3 +111,22 @@ class Transport(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ConnectionError):
             await pool.send(functions.upload.SaveBigFilePartRequest(55, 0, 2, b'part'))
         await pool.close()
+
+    async def test_balancer_avoids_lane_with_more_pending_work(self):
+        pool = UploadTransport(self.client, 2, 'balanced')
+        await pool.prepare()
+        pool.inflight[:] = [5, 0]
+        await pool.send(functions.upload.SaveBigFilePartRequest(55, 0, 2, b'part'))
+        self.assertEqual(len(pool.senders[0].requests), 0)
+        self.assertEqual(len(pool.senders[1].requests), 1)
+        self.assertEqual(pool.inflight, [5, 0])
+        await pool.close()
+
+    async def test_balancer_releases_lane_reservations_on_rpc_failure(self):
+        pool = UploadTransport(self.client, 2)
+        await pool.prepare()
+        self.client._call = AsyncMock(side_effect=ConnectionError())
+        with self.assertRaises(ConnectionError):
+            await pool.send(functions.upload.SaveBigFilePartRequest(55, 0, 2, b'part'))
+        self.assertEqual(pool.inflight, [0, 0])
+        await pool.close()

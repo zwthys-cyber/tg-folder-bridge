@@ -6,6 +6,7 @@ Private SDK usage is contained here and checked by integration tests.
 import asyncio
 import copy
 import importlib.metadata
+import time
 from telethon import functions
 from telethon.network import MTProtoSender
 from telethon.tl.alltlobjects import LAYER
@@ -16,17 +17,23 @@ class UploadTimeoutError(ConnectionError):
 
 
 class UploadTransport:
-    def __init__(self, client, connections=2):
+    def __init__(self, client, connections=2, scheduler='balanced'):
         if type(connections) is not int or not 2 <= connections <= 4:
             raise ValueError('Dedicated upload connections must be 2–4')
         if importlib.metadata.version('Telethon') != '1.45.0':
             raise RuntimeError('Dedicated uploads require Telethon 1.45.0')
+        if scheduler not in {'balanced', 'round_robin'}:
+            raise ValueError('Unknown upload scheduler')
+        self.scheduler = scheduler
         self.client = client
         self.count = connections
         self.senders = []
         self.initialized = []
         self.locks = []
         self.dc_id = None
+        self.inflight = []
+        self.latencies = []
+        self.cursor = 0
 
     async def prepare(self):
         client = self.client
@@ -54,6 +61,8 @@ class UploadTransport:
                     proxy=client._proxy, local_addr=client._local_addr)), 20)
                 self.initialized.append(False)
                 self.locks.append(asyncio.Lock())
+                self.inflight.append(0)
+                self.latencies.append(0.0)
         except asyncio.TimeoutError:
             await self.close()
             raise UploadTimeoutError('Upload connection setup timed out') from None
@@ -66,7 +75,16 @@ class UploadTransport:
             raise TypeError('Only large-file upload parts may use media connections')
         if not self.senders or self.dc_id != self.client.session.dc_id:
             raise ConnectionError('Upload transport is not prepared for the current DC')
-        index = request.file_part % len(self.senders)
+        if self.scheduler == 'round_robin':
+            index = request.file_part % len(self.senders)
+        else:
+            index = min(range(len(self.senders)), key=lambda i: (
+                self.inflight[i], self.latencies[i], (i-self.cursor) % len(self.senders)))
+            self.cursor = (index+1) % len(self.senders)
+        # Reserve without awaiting so other tasks observe the real lane load.
+        loads = self.inflight
+        loads[index] += 1
+        began = time.monotonic()
         sender = self.senders[index]
 
         async def invoke():
@@ -91,10 +109,17 @@ class UploadTransport:
             return await asyncio.wait_for(invoke(), 60)
         except asyncio.TimeoutError:
             raise UploadTimeoutError('Upload part did not finish within 60 seconds') from None
+        finally:
+            loads[index] -= 1
+            if loads is self.inflight:
+                elapsed = time.monotonic()-began
+                previous = self.latencies[index]
+                self.latencies[index] = .8*previous+.2*elapsed if previous else elapsed
 
     async def close(self):
         senders, self.senders = self.senders, []
         self.initialized, self.locks = [], []
+        self.inflight, self.latencies = [], []
         self.dc_id = None
         if senders:
             await asyncio.gather(*(sender.disconnect() for sender in senders),

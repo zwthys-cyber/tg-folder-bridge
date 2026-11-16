@@ -21,7 +21,7 @@ from transport_recovery import Cooldown, error_detail, rate_wait
 from upload_transport import UploadTransport
 
 
-async def benchmark(root, config, size, connections, rounds):
+async def benchmark(root, config, size, connections, rounds, compare_schedulers=False):
     guard = Cooldown(root/'rate-limit.json')
     if guard.remaining():
         raise RuntimeError(f'Rate-limit cooldown active: {guard.remaining():.0f} seconds')
@@ -35,6 +35,7 @@ async def benchmark(root, config, size, connections, rounds):
     client = TelegramClient(memory, int(config['API_ID']), config['API_HASH'],
         receive_updates=False, flood_sleep_threshold=0, raise_last_call_error=True)
     pool = UploadTransport(client, connections)
+    baseline_pool = UploadTransport(client, connections, 'round_robin') if compare_schedulers else None
     results = []
     try:
         await client.connect()
@@ -54,17 +55,18 @@ async def benchmark(root, config, size, connections, rounds):
                 order = (1, connections) if repeat % 2 == 0 else (connections, 1)
                 for count in order:
                     stats = {}
+                    transport = pool if count > 1 else baseline_pool
                     await upload_file(client, path, lambda *_: None, workers=8,
-                                      stats=stats, transport=pool if count > 1 else None)
-                    result = dict(round=repeat+1, **stats)
+                                      stats=stats, transport=transport)
+                    result = dict(round=repeat+1, comparison='candidate' if count > 1 else 'baseline', **stats)
                     results.append(result)
                     print(json.dumps(result), flush=True)
-            base = statistics.median(x['average_mib'] for x in results if x['connections'] == 1)
-            candidate = statistics.median(x['average_mib'] for x in results if x['connections'] == connections)
+            base = statistics.median(x['average_mib'] for x in results if x['comparison'] == 'baseline')
+            candidate = statistics.median(x['average_mib'] for x in results if x['comparison'] == 'candidate')
             summary = dict(baseline_mib=base, candidate_mib=candidate,
                            gain_percent=100*(candidate/base-1), connections=connections,
-                           size_mib=size, rounds=rounds)
-            report = root/'upload-benchmark.json'
+                           size_mib=size, rounds=rounds, compare_schedulers=compare_schedulers)
+            report = root/('upload-scheduler-benchmark.json' if compare_schedulers else 'upload-benchmark.json')
             # Atomic private report; never contains API credentials or session data.
             with tempfile.NamedTemporaryFile(mode='w', dir=root, delete=False) as output:
                 json.dump(dict(summary=summary, results=results), output)
@@ -78,6 +80,8 @@ async def benchmark(root, config, size, connections, rounds):
         raise
     finally:
         await pool.close()
+        if baseline_pool:
+            await baseline_pool.close()
         await client.disconnect()
 
 
@@ -87,6 +91,8 @@ def main():
     parser.add_argument('--size-mib', type=int, default=128)
     parser.add_argument('--connections', type=int, default=2)
     parser.add_argument('--rounds', type=int, default=2)
+    parser.add_argument('--compare-schedulers', action='store_true',
+                        help='Compare round-robin and balanced on identical connection counts')
     args = parser.parse_args()
     if not 16 <= args.size_mib <= 512 or not 2 <= args.connections <= 4 or not 1 <= args.rounds <= 3:
         parser.error('size:16–512 MiB; connections:2–4; rounds:1–3')
@@ -101,7 +107,7 @@ def main():
         except BlockingIOError:
             parser.exit(2, 'Stop the bridge before benchmarking.\n')
         try:
-            asyncio.run(benchmark(root, config, args.size_mib, args.connections, args.rounds))
+            asyncio.run(benchmark(root, config, args.size_mib, args.connections, args.rounds, args.compare_schedulers))
         except Exception as exc:
             parser.exit(1, error_detail(exc)+'\n')
 

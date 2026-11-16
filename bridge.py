@@ -22,6 +22,8 @@ from transport_recovery import Cooldown, error_detail, rate_wait
 from adaptive_speed import AdaptiveSpeed
 from upload_transport import UploadTransport
 
+VERSION = '0.3.0'
+
 
 class Bridge:
     def __init__(self):
@@ -53,7 +55,9 @@ class Bridge:
             self.settings_file, self.download_workers, self.upload_workers)
         self.automatic_speed = transfer_settings.automatic(self.settings_file)
         self.upload_connections = transfer_settings.connections(self.settings_file)
+        self.upload_scheduler = transfer_settings.scheduler(self.settings_file)
         self.upload_transport = None
+        self.auto_resume = os.getenv('AUTO_RESUME_INTERRUPTED', '1') == '1'
         self.tuners = dict(下载=AdaptiveSpeed(self.download_workers),
                           上传=AdaptiveSpeed(self.upload_workers))
         self.cooldown = Cooldown(root / 'rate-limit.json')
@@ -76,6 +80,7 @@ class Bridge:
         self.pending = None
         self.blocked = False
         self.worker = None
+        self.recovery_worker = None
         self.search_sessions = {}
 
     def install(self, app):
@@ -115,12 +120,24 @@ class Bridge:
                 print('用户连接暂不可用，已进入冷却；管理命令仍可使用。', flush=True)
         self.destination = (await app.bot.get_me()).username
         print('文件转存模式：' + self.transfer_mode, flush=True)
-        print(f'下载并发：{self.download_workers}；上传并发：{self.upload_workers}', flush=True)
+        print(f'Bridge {VERSION}；下载并发上限：{self.download_workers}；上传并发上限：{self.upload_workers}；'
+              f'上传连接：{self.upload_connections}；调度：{self.upload_scheduler}', flush=True)
         await self.update_menu(app.bot)
         self.client.add_event_handler(self.source_message, events.NewMessage(incoming=True))
         self.client.add_event_handler(self.source_message, events.MessageEdited(incoming=True))
         self.worker = asyncio.create_task(self.work())
         self.resume_after_upgrade()
+        self.recovery_worker = asyncio.create_task(self.restore_jobs())
+
+    async def restore_jobs(self):
+        if not self.auto_resume or self.transfer_mode != 'download_upload':
+            return
+        for job_id in self.store.recoverable_jobs:
+            row = self.store.get(job_id)
+            if row and row['owner'] in self.owners and row['state'] == 'interrupted':
+                self.store.update(job_id, 'queued', row['expected'], '服务恢复后自动续传。')
+                await self.jobs.put(job_id)
+                print(f'自动恢复任务：{job_id}', flush=True)
 
     def resume_after_upgrade(self):
         # Deployment can request one-time continuation without a second poller
@@ -246,6 +263,10 @@ class Bridge:
         raise ApplicationHandlerStop
 
     async def stop(self, app):
+        if self.recovery_worker:
+            self.recovery_worker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self.recovery_worker
         if self.worker:
             self.worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -369,19 +390,21 @@ class Bridge:
             raise ApplicationHandlerStop
         if context.args:
             try:
-                if len(context.args) != 1:
+                if not 1 <= len(context.args) <= 2:
                     raise ValueError
                 count = int(context.args[0])
+                scheduler = context.args[1] if len(context.args) == 2 else self.upload_scheduler
                 if not 1 <= count <= 4:
                     raise ValueError
                 transfer_settings.save(self.settings_file, self.download_workers,
-                    self.upload_workers, self.automatic_speed, count)
+                    self.upload_workers, self.automatic_speed, count, scheduler)
                 self.upload_connections = count
+                self.upload_scheduler = scheduler
             except ValueError:
-                await update.message.reply_text('用法：/transport 2；支持 1–4，1 为原上传通道。')
+                await update.message.reply_text('用法：/transport 2 [balanced 或 round_robin]；支持 1–4，1 为原上传通道。')
                 raise ApplicationHandlerStop
         await update.message.reply_text(
-            f'大文件上传连接：{self.upload_connections}。\n'
+            f'大文件上传连接：{self.upload_connections}；调度：{self.upload_scheduler}。\n'
             '1 为原通道；2–4 为独立媒体连接，设置从下一个文件生效。\n'
             '分块总并发仍由 /speed 控制；/diagnostics 查看实测记录。')
         raise ApplicationHandlerStop
@@ -389,14 +412,15 @@ class Bridge:
     async def diagnostics(self, update, context):
         if update.effective_chat.type != 'private' or update.effective_user.id not in self.owners:
             raise ApplicationHandlerStop
-        lines = [f'上传连接设置：{self.upload_connections}；独立连接仅用于大文件。']
+        lines = [f'Bridge {VERSION}；上传连接：{self.upload_connections}；调度：{self.upload_scheduler}。\n'
+                 f'重启自动续传：{"开启" if self.auto_resume else "关闭"}（仅下载上传模式）。']
         for row in self.store.transfer_history(8):
             m = row['payload']
             lines.append(f"{row['at']} UTC · {row['phase']} · {row['job']}\n"
                 f"{m.get('bytes', 0)/1024**2:.1f} MiB / {m.get('seconds', 0):.1f} 秒 · "
                 f"{m.get('average_mib', 0):.2f} MiB/s\n"
                 f"{m.get('transport', '?')} · {m.get('connections', 1)} 连接 · "
-                f"p95 {m.get('p95_ms', 0):.0f} ms · {m.get('error') or '阶段完成'}")
+                f"p95 {m.get('p95_ms', 0):.0f} ms · 分块续传 {m.get('retries', 0)} 次 · {m.get('error') or '阶段完成'}")
         if len(lines) == 1:
             lines.append('还没有新版本的传输记录，当前文件完成后可查看。')
         await update.message.reply_text('\n\n'.join(lines))
@@ -408,12 +432,13 @@ class Bridge:
             self.upload_transport = None
 
     async def get_upload_transport(self):
-        if self.upload_transport and self.upload_transport.count != self.upload_connections:
+        if self.upload_transport and (self.upload_transport.count != self.upload_connections
+                or self.upload_transport.scheduler != self.upload_scheduler):
             await self.close_upload_transport()
         if self.upload_connections == 1:
             return None
         if self.upload_transport is None:
-            self.upload_transport = UploadTransport(self.client, self.upload_connections)
+            self.upload_transport = UploadTransport(self.client, self.upload_connections, self.upload_scheduler)
         return self.upload_transport
 
     async def resume(self, update, context):
@@ -694,6 +719,8 @@ class Bridge:
             if metrics.get('recent_seconds', 0) > 0:
                 detail += (f"\n近期 {metrics['recent_seconds']:.1f} 秒：{metrics.get('recent_mib', 0):.2f} MiB/s"
                            f"；{metrics.get('connections', 1)} 条连接（{metrics.get('transport', 'sdk')}）")
+            if metrics.get('retries'):
+                detail += f"\n短暂断线已重连 {metrics['retries']} 次，保留已确认分块。"
             self.store.update(job['id'], 'running', job['expected'], detail)
         return callback
 
