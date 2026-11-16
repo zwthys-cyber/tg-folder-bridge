@@ -2,6 +2,14 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaDocument, InputMediaVideo
 
 
+def resource_summary(stats):
+    return (f'📊 资源统计\n'
+            f'　• 文件夹：{stats["folders"]} 个\n'
+            f'　• 消息：{stats["messages"]} 条\n'
+            f'　• 图片：{stats["photos"]} 张\n'
+            f'　• 视频：{stats["videos"]} 个')
+
+
 def catalog_page(rows, page=1, page_callback_prefix='bridge_catalog', favorites=False):
     pages = max(1, (len(rows) + 9) // 10)
     page = max(1, min(page, pages))

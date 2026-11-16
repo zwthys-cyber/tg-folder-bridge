@@ -72,6 +72,22 @@ class Parsing(unittest.TestCase):
 
 
 class CloudTransfer(unittest.IsolatedAsyncioTestCase):
+    async def test_start_sends_statistics_then_catalog_but_catalog_only_sends_list(self):
+        bot=NS(send_message=AsyncMock())
+        update=NS(effective_chat=NS(type='private',id=7))
+        with self.assertRaises(ApplicationHandlerStop):
+            await self.bridge.start_command(update,NS(bot=bot))
+        messages=[c.args[1] for c in bot.send_message.await_args_list]
+        self.assertEqual(len(messages),2)
+        self.assertTrue(messages[0].startswith('📊 资源统计'))
+        self.assertIn('文件夹：0 个',messages[0])
+        self.assertTrue(messages[1].startswith('📁 文件夹列表'))
+        bot.send_message.reset_mock()
+        with self.assertRaises(ApplicationHandlerStop):
+            await self.bridge.catalog_command(update,NS(bot=bot))
+        self.assertEqual(bot.send_message.await_count,1)
+        self.assertTrue(bot.send_message.call_args.args[1].startswith('📁 文件夹列表'))
+
     async def test_upload_order_matches_source_even_when_native_video_arrives_later(self):
         media=[NS(chat_id=101,id=n,raw_text='',photo=None,document=NS(id=n),
                   media=NS(video=n==6),buttons=[]) for n in (5,6,7)]

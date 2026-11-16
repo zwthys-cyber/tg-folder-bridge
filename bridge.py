@@ -16,7 +16,7 @@ from core import Store, folder_title, folder_metadata, source_entry, media_count
 from media_spool import MediaSpool
 from previews import document_thumbnail, make_jpeg_preview
 from fast_upload import upload_file
-from catalog_ui import catalog_page, send_file_page, send_folder_card, favorite_button
+from catalog_ui import catalog_page, send_file_page, send_folder_card, favorite_button, resource_summary
 from folder_cover import image_cover
 import transfer_settings
 from transport_recovery import Cooldown, error_detail, rate_wait
@@ -26,7 +26,7 @@ from bot_api_config import endpoint, LOCAL
 from local_upload import eligible, send_local, DeliveryUnknownError
 from content_identity import analyze, preference
 
-VERSION = '0.5.6'
+VERSION = '0.5.7'
 
 
 class Bridge:
@@ -99,7 +99,7 @@ class Bridge:
                                        self.receive_file), group=-100)
         app.add_handler(CommandHandler('fetch', self.fetch), group=-100)
         app.add_handler(CommandHandler('start', self.start_command), group=-100)
-        app.add_handler(CommandHandler('catalog', self.start_command), group=-100)
+        app.add_handler(CommandHandler('catalog', self.catalog_command), group=-100)
         app.add_handler(CommandHandler('favorites', self.favorites_command), group=-100)
         app.add_handler(CommandHandler('help', self.help_command), group=-100)
         app.add_handler(CommandHandler('folder', self.folder), group=-100)
@@ -220,6 +220,15 @@ class Bridge:
                             or job['state'] == 'complete' or job.get('audit_public')))
 
     async def start_command(self, update, context):
+        if update.effective_chat.type == 'private':
+            rows=self.store.catalog()
+            stats=self.store.resource_stats()
+            await context.bot.send_message(update.effective_chat.id, resource_summary(stats))
+            text,markup=catalog_page(rows)
+            await context.bot.send_message(update.effective_chat.id,text,reply_markup=markup)
+        raise ApplicationHandlerStop
+
+    async def catalog_command(self, update, context):
         if update.effective_chat.type == 'private':
             text, markup = catalog_page(self.store.catalog())
             await context.bot.send_message(update.effective_chat.id, text, reply_markup=markup)

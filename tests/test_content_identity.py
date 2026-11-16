@@ -11,6 +11,24 @@ from content_identity import analyze, preference
 
 
 class Index(unittest.TestCase):
+    def test_resource_statistics_match_visible_catalog_and_ignore_merged_duplicates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store=Store(Path(tmp)/'db')
+            self.assertEqual(store.resource_stats(),dict(folders=0,messages=0,photos=0,videos=0))
+            for job in ('public','hidden','audit'):
+                store.create(job,7,'link')
+            for n,kind in ((1,'photo'),(2,'video'),(3,'video')):
+                store.add_file('public',(1,n),NS(chat_id=7,message_id=n),str(n),kind)
+            store.merge_alias('public',(1,3),(1,2),'duplicate')
+            store.update('public','complete',3)
+            store.add_file('hidden',(2,1),NS(chat_id=7,message_id=1),'hidden','photo')
+            store.add_file('audit',(3,1),NS(chat_id=7,message_id=1),'audit','document')
+            store.set_source_entries('audit',[dict(source_chat=3,source_message=1,position=1,name='clip.mp4',size=1,kind='video')])
+            store.update('audit','complete',1);store.request_audit('audit');store.update('audit','running',1)
+            self.assertEqual(store.resource_stats(),dict(folders=2,messages=5,photos=1,videos=2))
+            self.assertEqual(len(store.catalog()),2)
+            store.db.close()
+
     def test_source_order_survives_priority_upload_and_alias_merge(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)/'db'; store = Store(path); store.create('job', 7, 'link')

@@ -366,6 +366,18 @@ class Store:
             GROUP BY jobs.id ORDER BY jobs.rowid DESC
         ''')]
 
+    def resource_stats(self):
+        row=self.db.execute('''SELECT count(DISTINCT j.id) AS folders,count(*) AS media,
+            coalesce(sum(coalesce(e.kind,f.kind)='photo'),0) AS photos,
+            coalesce(sum(coalesce(e.kind,f.kind)='video'),0) AS videos
+            FROM jobs j JOIN files f ON f.job=j.id LEFT JOIN source_entries e
+              ON e.job=f.job AND e.source_chat=f.source_chat AND e.source_message=f.source_message
+            WHERE j.state='complete' OR j.audit_public=1''').fetchone()
+        # Match folder details: media entries plus one information message
+        # per folder, excluding navigation and repeated deliveries.
+        return dict(folders=row['folders'],messages=row['media']+row['folders'],
+                    photos=row['photos'],videos=row['videos'])
+
     def search_catalog(self, query, uid, owned=False):
         return [dict(x) for x in self.db.execute('''
             SELECT jobs.*, count(files.file_id) AS file_count FROM jobs
