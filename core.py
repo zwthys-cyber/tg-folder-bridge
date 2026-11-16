@@ -101,6 +101,10 @@ class Store:
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
         self.db.executescript('''
+            CREATE TABLE IF NOT EXISTS catalog_panels (
+                chat INTEGER, list_message INTEGER, stats_message INTEGER,
+                PRIMARY KEY(chat,list_message)
+            );
             CREATE TABLE IF NOT EXISTS favorites (
                 owner INTEGER, job TEXT, PRIMARY KEY(owner,job)
             );
@@ -263,6 +267,22 @@ class Store:
 
     def set_cover(self, job, file_id):
         self.db.execute('UPDATE jobs SET cover_file_id=? WHERE id=?', (file_id, job))
+        self.db.commit()
+
+    def register_catalog_panel(self, chat, list_message, stats_message=None):
+        if not isinstance(list_message,int) or (stats_message is not None and not isinstance(stats_message,int)):
+            return
+        self.db.execute('INSERT OR REPLACE INTO catalog_panels VALUES(?,?,?)',
+                        (chat,list_message,stats_message))
+        self.db.commit()
+
+    def catalog_panel_stats(self, chat, list_message):
+        row=self.db.execute('SELECT stats_message FROM catalog_panels WHERE chat=? AND list_message=?',
+                            (chat,list_message)).fetchone()
+        return row['stats_message'] if row else None
+
+    def forget_catalog_panel(self, chat, list_message):
+        self.db.execute('DELETE FROM catalog_panels WHERE chat=? AND list_message=?',(chat,list_message))
         self.db.commit()
 
     def is_favorite(self, owner, job):

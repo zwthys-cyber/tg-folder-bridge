@@ -9,7 +9,7 @@ import time
 import uuid
 from pathlib import Path
 from telegram import BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeChat, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import BadRequest, RetryAfter
+from telegram.error import BadRequest, RetryAfter, TelegramError
 from telegram.ext import ApplicationHandlerStop, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 from telethon import TelegramClient, events, types
 from core import Store, folder_title, folder_metadata, source_entry, media_count, media_key, pagination_marker, parse_link
@@ -26,7 +26,7 @@ from bot_api_config import endpoint, LOCAL
 from local_upload import eligible, send_local, DeliveryUnknownError
 from content_identity import analyze, preference
 
-VERSION = '0.5.7'
+VERSION = '0.5.8'
 
 
 class Bridge:
@@ -222,9 +222,10 @@ class Bridge:
         if update.effective_chat.type == 'private':
             rows=self.store.catalog()
             stats=self.store.resource_stats()
-            await context.bot.send_message(update.effective_chat.id, resource_summary(stats))
+            summary=await context.bot.send_message(update.effective_chat.id, resource_summary(stats))
             text,markup=catalog_page(rows)
-            await context.bot.send_message(update.effective_chat.id,text,reply_markup=markup)
+            listing=await context.bot.send_message(update.effective_chat.id,text,reply_markup=markup)
+            self.store.register_catalog_panel(update.effective_chat.id,listing.message_id,summary.message_id)
         raise ApplicationHandlerStop
 
     async def help_command(self, update, context):
@@ -277,7 +278,9 @@ class Bridge:
                 rows = self.favorite_rows(update.effective_user.id) if favorites else self.store.catalog()
                 text, markup = catalog_page(rows, page, parts[0], favorites=favorites)
                 if getattr(query.message, 'photo', None):
-                    await context.bot.send_message(update.effective_chat.id, text, reply_markup=markup)
+                    listing=await context.bot.send_message(update.effective_chat.id, text, reply_markup=markup)
+                    if not favorites:
+                        self.store.register_catalog_panel(update.effective_chat.id,listing.message_id)
                 else:
                     await query.edit_message_text(text, reply_markup=markup)
             elif parts[0] == 'bridge_search':
@@ -321,6 +324,7 @@ class Bridge:
                 items = self.store.files(job['id'])
                 if parts[0] == 'bridge_open' and page == 1:
                     await self.show_folder_card(context.bot, update.effective_chat.id, job, items)
+                    await self.dismiss_catalog(context.bot,update.effective_chat.id,query.message)
                 else:
                     if progress is None:
                         old_text=getattr(query.message,'text',None) or ''
@@ -333,6 +337,23 @@ class Bridge:
         except (ValueError, IndexError):
             await query.answer('列表已更新，请重新发送 /start', show_alert=True)
         raise ApplicationHandlerStop
+
+    async def dismiss_catalog(self, bot, chat, message):
+        text=getattr(message,'text',None) or ''
+        message_id=getattr(message,'message_id',None)
+        if not text.startswith('📁 文件夹列表') or not isinstance(message_id,int):
+            return
+        stats_id=self.store.catalog_panel_stats(chat,message_id)
+        ids=[stats_id,message_id] if stats_id is not None else [message_id]
+        removed=True
+        for mid in ids:
+            try:
+                await bot.delete_message(chat_id=chat,message_id=mid)
+            except TelegramError as exc:
+                removed=False
+                print('菜单消息清理暂不可用：'+type(exc).__name__,flush=True)
+        if removed:
+            self.store.forget_catalog_panel(chat,message_id)
 
     async def show_folder_card(self, bot, chat, job, items):
         photo = job.get('cover_file_id')

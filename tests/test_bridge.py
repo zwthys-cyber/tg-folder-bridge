@@ -72,6 +72,43 @@ class Parsing(unittest.TestCase):
 
 
 class CloudTransfer(unittest.IsolatedAsyncioTestCase):
+    async def test_open_dismisses_only_matching_catalog_pair_after_card_succeeds(self):
+        self.bridge.store.update('job','complete',0)
+        self.bridge.store.register_catalog_panel(7,102,100)
+        self.bridge.store.register_catalog_panel(8,102,99)
+        query=NS(data='bridge_open:job:1',answer=AsyncMock(),
+                 message=NS(text='📁 文件夹列表\n共 1 个文件夹',message_id=102,photo=None))
+        update=NS(callback_query=query,effective_chat=NS(type='private',id=7),effective_user=NS(id=7))
+        self.bridge.show_folder_card=AsyncMock()
+        bot=NS(delete_message=AsyncMock())
+        with self.assertRaises(ApplicationHandlerStop):
+            await self.bridge.catalog_callback(update,NS(bot=bot))
+        self.assertEqual([c.kwargs['message_id'] for c in bot.delete_message.await_args_list],[100,102])
+        self.assertEqual(self.bridge.store.catalog_panel_stats(8,102),99)
+        self.assertIsNone(self.bridge.store.catalog_panel_stats(7,102))
+        bot.delete_message.reset_mock()
+        self.bridge.show_folder_card.side_effect=RuntimeError('cover send failed')
+        with self.assertRaises(RuntimeError):
+            await self.bridge.catalog_callback(update,NS(bot=bot))
+        bot.delete_message.assert_not_awaited()
+
+    async def test_catalog_pair_is_recorded_and_survives_store_reopen(self):
+        bot=NS(send_message=AsyncMock(side_effect=[NS(message_id=201),NS(message_id=205)]))
+        update=NS(effective_chat=NS(type='private',id=7))
+        with self.assertRaises(ApplicationHandlerStop):
+            await self.bridge.start_command(update,NS(bot=bot))
+        self.assertEqual(self.bridge.store.catalog_panel_stats(7,205),201)
+        path=self.bridge.store.db.execute('PRAGMA database_list').fetchone()[2]
+        self.bridge.store.db.close();self.bridge.store=Store(path)
+        self.assertEqual(self.bridge.store.catalog_panel_stats(7,205),201)
+
+    async def test_folder_details_and_unknown_stats_are_not_deleted(self):
+        bot=NS(delete_message=AsyncMock())
+        await self.bridge.dismiss_catalog(bot,7,NS(message_id=20,text='📁 测试文件夹\n📖 内容统计：'))
+        bot.delete_message.assert_not_awaited()
+        await self.bridge.dismiss_catalog(bot,7,NS(message_id=22,text='📁 文件夹列表'))
+        bot.delete_message.assert_awaited_once_with(chat_id=7,message_id=22)
+
     async def test_start_sends_statistics_then_catalog(self):
         bot=NS(send_message=AsyncMock())
         update=NS(effective_chat=NS(type='private',id=7))
