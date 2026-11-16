@@ -94,6 +94,28 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         self.env.stop()
         self.tmp.cleanup()
 
+    async def test_index_audit_finishes_cached_merge_and_never_uploads_unmatched_media(self):
+        media = [NS(chat_id=101, id=n, raw_text='', photo=None,
+                    document=NS(id=n), media=NS(video=n == 2), buttons=[]) for n in (1, 2, 3)]
+        for n in (1, 2):
+            self.bridge.store.add_file('job', (101, n), NS(chat_id=7, message_id=n),
+                                       f'file{n}', 'document', source_media_key=f'document:{n}')
+            self.bridge.store.set_analysis('job', (101, n), dict(content_sha256='same',
+                stream_sha256='', quality=dict(native_source=n == 2, has_location=False)))
+        async def send(*args):
+            for message in media:
+                await self.job['events'].put(message)
+        self.bridge.client = NS(get_entity=AsyncMock(return_value=NS(id=101, bot=True)),
+            get_messages=AsyncMock(return_value=[]), send_message=AsyncMock(side_effect=send),
+            disconnect=AsyncMock())
+        self.bridge.transfer_media = AsyncMock()
+        self.job.update(expected=3, dedup_audit=True)
+        await self.bridge.collect('https://t.me/epan?start=s_abc', self.job)
+        self.bridge.transfer_media.assert_not_awaited()
+        self.assertTrue(self.job['audit_unmatched'])
+        self.assertEqual(self.bridge.store.files('job')[0]['file_id'], 'file2')
+        self.assertEqual(self.bridge.store.processed_count('job'), 2)
+
     async def test_follow_url_forward_cloud_and_record_bot_file_id(self):
         target = NS(url='https://t.me/SPXM111_bot?start=s_files', data=None, text='📥 获取文件')
         root = NS(chat_id=101, id=2, raw_text='图片数：1 张', photo=None,

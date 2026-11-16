@@ -1080,8 +1080,21 @@ class Bridge:
             if previous:
                 if previous.get('is_alias'):
                     continue
-                if job.get('dedup_audit') and not previous.get('content_sha256'):
-                    await self.transfer_media(message, previous_key, job, existing=previous)
+                if job.get('dedup_audit'):
+                    if not previous.get('content_sha256'):
+                        await self.transfer_media(message, previous_key, job, existing=previous)
+                    else:
+                        # A restart can occur after persisting a fingerprint
+                        # but before merging its index row. Finish that merge
+                        # without downloading or uploading the original again.
+                        import json
+                        duplicate = self.store.duplicate(job['id'], previous_key, previous)
+                        if duplicate:
+                            other = (duplicate['source_chat'], duplicate['source_message'])
+                            if preference(json.loads(previous['quality_json'])) > preference(json.loads(duplicate['quality_json'])):
+                                self.store.merge_alias(job['id'], other, previous_key, duplicate.get('media_key', ''))
+                            else:
+                                self.store.merge_alias(job['id'], previous_key, other, previous.get('media_key', ''))
                     continue
                 ext = getattr(getattr(message, 'file', None), 'ext', '') or ''
                 if self.transfer_mode == 'download_upload' and self.heic_previews and ext.lower() in {'.heic', '.heif'}:
