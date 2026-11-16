@@ -8,6 +8,8 @@
 
 新增独立上传连接 `/transport 2`、阶段测速记录 `/diagnostics` 和部署主机 A/B 测试工具。默认仍使用原通道；真实测速有收益后再切换。连接生命周期、备份回退和验收步骤见 [OPERATIONS.md](OPERATIONS.md)。
 
+可选容量路由：2000 MB 以内由官方本地 Bot API 上传，超出继续用用户中转。必须同步迁移收消息入口，并处理未知发送结果；配置和上线步骤见 [HYBRID.md](HYBRID.md)。
+
 实际部署已遇到 32 路触发传输层 HTTP 429；现在默认改为 8 路，仍允许管理员在线调到 32 路，但触发限流会自动降低并发、保存冷却时间、重建连接并继续任务。修复与恢复步骤见 [RATE_LIMITS.md](RATE_LIMITS.md)。
 
 已部署用户更新与清空转存索引后重新导入，见 [UPGRADE_CATALOG.md](UPGRADE_CATALOG.md)。清空索引不删除 Telegram 聊天中的旧媒体。
