@@ -24,11 +24,12 @@ db.execute(
 )
 db.commit()
 sessions = {}
+API_BASE = 'https://api.telegram.org'
 
 
 def api(method, **data):
     request = Request(
-        'https://api.telegram.org/bot' + TOKEN + '/' + method,
+        API_BASE + '/bot' + TOKEN + '/' + method,
         data=json.dumps(data).encode(),
         headers={'Content-Type': 'application/json'}
     )
@@ -213,6 +214,13 @@ def stop_signal(signum, frame):
 
 
 def main():
+    global API_BASE
+    root = Path(os.getenv('SOUGA_BRIDGE_DIR', '/root/tg-folder-bridge')).resolve()
+    sys.path.insert(0, str(root))
+    from dotenv import load_dotenv
+    from bot_api_config import endpoint
+    load_dotenv(root / '.env', override=False)
+    API_BASE = endpoint()
     me = api('getMe')
     print('机器人已连接：@' + me['username'], flush=True)
     if not ADMIN.exists():

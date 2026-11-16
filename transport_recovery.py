@@ -10,7 +10,7 @@ def rate_wait(error, attempt):
     name = type(error).__name__
     if name == 'InvalidBufferError' and getattr(error, 'code', None) == 429:
         return min(120 * 2**attempt, 900)
-    if name in {'FloodWaitError', 'FloodPremiumWaitError'}:
+    if name in {'FloodWaitError', 'FloodPremiumWaitError', 'LocalBotRateLimitError'}:
         return max(1, int(getattr(error, 'seconds', 0)))
     return None
 

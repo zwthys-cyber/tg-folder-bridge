@@ -21,8 +21,10 @@ import transfer_settings
 from transport_recovery import Cooldown, error_detail, rate_wait
 from adaptive_speed import AdaptiveSpeed
 from upload_transport import UploadTransport
+from bot_api_config import endpoint, LOCAL
+from local_upload import eligible, send_local, DeliveryUnknownError
 
-VERSION = '0.3.1'
+VERSION = '0.4.0'
 
 
 class Bridge:
@@ -57,6 +59,12 @@ class Bridge:
         self.upload_connections = transfer_settings.connections(self.settings_file)
         self.upload_scheduler = transfer_settings.scheduler(self.settings_file)
         self.upload_transport = None
+        self.bot_api_base = endpoint()
+        self.upload_backend = os.getenv('UPLOAD_BACKEND', 'relay')
+        if self.upload_backend not in {'relay', 'hybrid'}:
+            raise ValueError('UPLOAD_BACKEND must be relay or hybrid')
+        if self.upload_backend == 'hybrid' and self.bot_api_base != LOCAL:
+            raise ValueError('Hybrid uploads require the local endpoint for polling and delivery')
         self.auto_resume = os.getenv('AUTO_RESUME_INTERRUPTED', '1') == '1'
         self.tuners = dict(下载=AdaptiveSpeed(self.download_workers),
                           上传=AdaptiveSpeed(self.upload_workers))
@@ -98,6 +106,7 @@ class Bridge:
         app.add_handler(CommandHandler('speed', self.speed), group=-100)
         app.add_handler(CommandHandler('transport', self.transport_command), group=-100)
         app.add_handler(CommandHandler('diagnostics', self.diagnostics), group=-100)
+        app.add_handler(CommandHandler('resolve', self.resolve_delivery), group=-100)
         app.add_handler(CallbackQueryHandler(self.original, pattern=r'^bridge_original:'), group=-100)
         app.add_handler(CallbackQueryHandler(self.catalog_callback, pattern=r'^bridge_(catalog|open|search):'), group=-100)
         app.add_handler(MessageHandler(filters.Regex(r'^https://t\.me/\w+\?start='),
@@ -135,6 +144,10 @@ class Bridge:
         for job_id in self.store.recoverable_jobs:
             row = self.store.get(job_id)
             if row and row['owner'] in self.owners and row['state'] == 'interrupted':
+                if self.store.unknown_local_send(job_id):
+                    self.store.update(job_id, 'needs_review', row['expected'],
+                        '本地上传结果未知，请先检查聊天；确认未收到后使用 /resolve 任务编号 retry。')
+                    continue
                 self.store.update(job_id, 'queued', row['expected'], '服务恢复后自动续传。')
                 await self.jobs.put(job_id)
                 print(f'自动恢复任务：{job_id}', flush=True)
@@ -160,6 +173,8 @@ class Bridge:
                 row = self.store.get(job_id)
                 if (row and row['owner'] in self.owners and row['state'] == 'interrupted'
                         and not self.jobs.full()):
+                    if self.store.unknown_local_send(job_id):
+                        continue
                     self.store.update(job_id, 'queued', row['expected'], '升级后继续任务。')
                     self.jobs.put_nowait(job_id)
             request_file.unlink()
@@ -189,6 +204,7 @@ class Bridge:
                     BotCommand('speed', '调整上传下载并发'),
                     BotCommand('transport', '设置上传连接数'),
                     BotCommand('diagnostics', '查看实测传输记录'),
+                    BotCommand('resolve', '确认未知上传后允许重试'),
                     BotCommand('delete', '删除搜索资源')], scope=BotCommandScopeChat(owner))
             except BadRequest:
                 pass  # This owner may not have opened the bot yet.
@@ -414,7 +430,8 @@ class Bridge:
         if update.effective_chat.type != 'private' or update.effective_user.id not in self.owners:
             raise ApplicationHandlerStop
         lines = [f'Bridge {VERSION}；上传连接：{self.upload_connections}；调度：{self.upload_scheduler}。\n'
-                 f'重启自动续传：{"开启" if self.auto_resume else "关闭"}（仅下载上传模式）。']
+                 f'重启自动续传：{"开启" if self.auto_resume else "关闭"}（仅下载上传模式）。\n'
+                 f'上传路由：{self.upload_backend}（hybrid：2000 MB 以内本地 API，超出走中转）。']
         for row in self.store.transfer_history(8):
             m = row['payload']
             lines.append(f"{row['at']} UTC · {row['phase']} · {row['job']}\n"
@@ -448,6 +465,8 @@ class Bridge:
         job = self.store.get(context.args[0]) if context.args else None
         if not job or job['owner'] != update.effective_user.id:
             await update.message.reply_text('用法：/resume 原任务编号')
+        elif self.store.unknown_local_send(job['id']):
+            await update.message.reply_text('上次本地上传结果未知。先检查聊天，确认未收到后发送：\n/resolve '+job['id']+' retry')
         elif self.blocked or self.jobs.full():
             await update.message.reply_text('服务暂不能接收续传任务；收件未确认时请先重启。')
         elif job['state'] in {'queued', 'running', 'cooldown'}:
@@ -457,6 +476,21 @@ class Bridge:
             self.jobs.put_nowait(job['id'])
             await update.message.reply_text(
                 f"已排队续传：{job['id']}\n识别并跳过已保存原文件，HEIC 可补充预览。\n/status {job['id']}")
+        raise ApplicationHandlerStop
+
+    async def resolve_delivery(self, update, context):
+        if update.effective_chat.type != 'private' or update.effective_user.id not in self.owners:
+            raise ApplicationHandlerStop
+        job = self.store.get(context.args[0]) if context.args else None
+        if (len(context.args) != 2 or context.args[1] != 'retry' or not job
+                or job['owner'] != update.effective_user.id):
+            await update.message.reply_text('确认聊天里未收到该文件后，使用 /resolve 任务编号 retry。')
+        elif self.active or self.pending:
+            await update.message.reply_text('请等待当前任务结束后再确认未知上传。')
+        else:
+            self.store.authorize_local_retry(job['id'])
+            self.blocked = False
+            await update.message.reply_text('已记录你确认未收到。发送 /resume '+job['id']+' 继续。')
         raise ApplicationHandlerStop
 
     async def original(self, update, context):
@@ -559,6 +593,9 @@ class Bridge:
         if wait is None and not connection:
             return False
         if wait is not None:
+            if type(error).__name__ == 'LocalBotRateLimitError':
+                self.cooldown.defer(wait, error_detail(error))
+                return True
             phase = (self.active or {}).get('phase', '')
             if phase != '上传':
                 self.download_workers = max(1, min(8, self.download_workers // 2))
@@ -776,6 +813,10 @@ class Bridge:
             await self.deliver(message, key)
 
     async def deliver(self, message, key, marker=None, upload_path=None, attrs=None, preview=False, thumbnail=None, replace_original=False):
+        if (upload_path is not None and self.upload_backend == 'hybrid'
+                and eligible(Path(upload_path).stat().st_size)):
+            return await self.deliver_local(message, key, marker, upload_path, attrs,
+                                            preview, thumbnail, replace_original)
         future = asyncio.get_running_loop().create_future()
         self.pending = dict(source=key, future=future, media_key=media_key(message), replace_original=replace_original)
         if marker:
@@ -816,6 +857,34 @@ class Bridge:
             raise
         finally:
             self.pending = None
+
+    async def deliver_local(self, message, key, marker, path, attrs, preview, thumbnail, replace):
+        job = self.active
+        self.store.update(job['id'], 'running', job['expected'],
+            '本地 Bot API 正在上传（2000 MB 以内）。此通道没有可靠的远端字节进度，确认发送后计入文件夹。')
+        filename = next((a.file_name for a in attrs or [] if isinstance(a, types.DocumentAttributeFilename)), Path(path).name)
+        photo = preview or (not self.document_groups and bool(message.photo))
+        stats, failure = {}, ''
+        def save(reply, kind, media):
+            if preview:
+                self.store.set_preview(job['id'], key, media.file_id)
+            else:
+                self.store.add_file(job['id'], key, reply, media.file_id, kind,
+                    caption=message.raw_text or '', source_media_key=media_key(message),
+                    has_thumbnail=bool(getattr(media, 'thumbnail', None)) or kind == 'photo', replace=replace)
+        try:
+            return await send_local(self.app.bot, self.store, job['id'], key,
+                self.store.get(job['id'])['owner'], path, marker, filename,
+                photo=photo, thumbnail=thumbnail, stats=stats, save=save, caption=message.raw_text or '')
+        except DeliveryUnknownError:
+            self.blocked = True
+            failure = 'DeliveryUnknownError'
+            raise
+        except BaseException as exc:
+            failure = type(exc).__name__
+            raise
+        finally:
+            self.store.record_transfer(job['id'], '上传', stats, failure)
 
     async def collect(self, link, job):
         visited = set()

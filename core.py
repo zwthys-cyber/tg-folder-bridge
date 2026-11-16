@@ -65,6 +65,10 @@ class Store:
                 id INTEGER PRIMARY KEY, at TEXT DEFAULT CURRENT_TIMESTAMP,
                 job TEXT, phase TEXT, payload TEXT
             );
+            CREATE TABLE IF NOT EXISTS local_send_intents (
+                id INTEGER PRIMARY KEY, job TEXT, source_chat INTEGER,
+                source_message INTEGER, marker TEXT, state TEXT
+            );
         ''')
         columns = {x['name'] for x in self.db.execute('PRAGMA table_info(files)')}
         if 'caption' not in columns:
@@ -91,6 +95,34 @@ class Store:
         self.db.execute('INSERT INTO jobs(id,owner,link,state,restart_pending) VALUES(?,?,?,?,1)',
                         (job, owner, link, 'queued'))
         self.db.commit()
+
+    def begin_local_send(self, job, source, marker):
+        if self.unknown_local_send(job):
+            raise RuntimeError('An earlier local delivery needs review')
+        cursor = self.db.execute('INSERT INTO local_send_intents(job,source_chat,source_message,marker,state) '
+                                 "VALUES(?,?,?,?,'pending')", (job, *source, marker))
+        self.db.commit()
+        return cursor.lastrowid
+
+    def unknown_local_send(self, job):
+        return self.db.execute("SELECT 1 FROM local_send_intents WHERE job=? AND state='pending' LIMIT 1",
+                               (job,)).fetchone() is not None
+
+    def reject_local_send(self, intent):
+        self.db.execute("UPDATE local_send_intents SET state='rejected' WHERE id=?", (intent,))
+        self.db.commit()
+
+    def authorize_local_retry(self, job):
+        self.db.execute("UPDATE local_send_intents SET state='retry_authorized' WHERE job=? AND state='pending'", (job,))
+        self.db.commit()
+
+    def confirm_local_send(self, intent, save):
+        try:
+            self.db.execute("UPDATE local_send_intents SET state='confirmed' WHERE id=? AND state='pending'", (intent,))
+            save()  # add_file / set_preview commits this transaction too.
+        except BaseException:
+            self.db.rollback()
+            raise
 
     def record_transfer(self, job, phase, stats, error=''):
         import json

@@ -612,3 +612,20 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         self.bridge.transfer_mode = 'forward'
         await self.bridge.restore_jobs()
         self.assertTrue(self.bridge.jobs.empty())
+
+    async def test_hybrid_small_file_bypasses_user_relay_and_pending_receipt(self):
+        self.bridge.upload_backend = 'hybrid'
+        self.bridge.deliver_local = AsyncMock()
+        path = Path(self.tmp.name)/'small.bin'; path.write_bytes(b'data')
+        await self.bridge.deliver(NS(), (1, 2), marker='nonce', upload_path=path)
+        self.bridge.deliver_local.assert_awaited_once()
+        self.assertIsNone(self.bridge.pending)
+
+    async def test_unknown_local_delivery_is_not_replayed_after_restart(self):
+        self.bridge.transfer_mode = 'download_upload'
+        self.bridge.store.update('job', 'interrupted', 63)
+        self.bridge.store.begin_local_send('job', (1, 2), 'nonce')
+        self.bridge.store.recoverable_jobs = ['job']
+        await self.bridge.restore_jobs()
+        self.assertTrue(self.bridge.jobs.empty())
+        self.assertEqual(self.bridge.store.get('job')['state'], 'needs_review')

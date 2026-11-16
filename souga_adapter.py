@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application
 from bridge import Bridge
+from bot_api_config import configure
 
 
 def is_bridge_update(raw, relay_id):
@@ -26,7 +27,7 @@ def is_bridge_update(raw, relay_id):
     if message.get('chat', {}).get('type') != 'private':
         return False
     text = message.get('text', '').strip()
-    if re.match(r'^/(start|help|catalog|fetch|folder|folders|status|resume|speed|transport|diagnostics)(?:@\w+)?(?:\s|$)', text):
+    if re.match(r'^/(start|help|catalog|fetch|folder|folders|status|resume|speed|transport|diagnostics|resolve)(?:@\w+)?(?:\s|$)', text):
         return True
     if re.match(r'^https://t\.me/\w+\?start=', text):
         return True
@@ -83,7 +84,7 @@ class SougaBridge:
         if not configured.is_absolute():
             os.environ['DATA_DIR'] = str(self.env_file.parent / configured)
         self.bridge = Bridge()
-        self.app = Application.builder().token(self.token).updater(None).build()
+        self.app = configure(Application.builder().token(self.token).updater(None)).build()
         self.bridge.install(self.app)
         await self.app.initialize()
         await self.app.start()
