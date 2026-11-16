@@ -72,6 +72,24 @@ class Parsing(unittest.TestCase):
 
 
 class CloudTransfer(unittest.IsolatedAsyncioTestCase):
+    async def test_upload_order_matches_source_even_when_native_video_arrives_later(self):
+        media=[NS(chat_id=101,id=n,raw_text='',photo=None,document=NS(id=n),
+                  media=NS(video=n==6),buttons=[]) for n in (5,6,7)]
+        async def send(*args):
+            for message in media:
+                await self.job['events'].put(message)
+        self.bridge.client=NS(get_entity=AsyncMock(return_value=NS(id=101,bot=True)),
+            get_messages=AsyncMock(return_value=[]),send_message=AsyncMock(side_effect=send),
+            disconnect=AsyncMock())
+        self.bridge.transfer_media=AsyncMock()
+        self.job['expected']=3
+        await self.bridge.collect('https://t.me/epan?start=s_abc',self.job)
+        self.assertEqual([call.args[1] for call in self.bridge.transfer_media.await_args_list],
+                         [(101,5),(101,6),(101,7)])
+        self.assertEqual([tuple(row) for row in self.bridge.store.db.execute(
+            'SELECT source_message,position FROM source_entries WHERE job=? ORDER BY position',('job',))],
+            [(5,1),(6,2),(7,3)])
+
     async def test_foreign_view_session_and_unavailable_favorite_are_rejected(self):
         progress=self.bridge.store.start_view(7,'job')
         query=NS(data=f'bridge_page:{progress.id}:2',answer=AsyncMock(),message=NS(photo=None))

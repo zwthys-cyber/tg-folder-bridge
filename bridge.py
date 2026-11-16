@@ -26,7 +26,7 @@ from bot_api_config import endpoint, LOCAL
 from local_upload import eligible, send_local, DeliveryUnknownError
 from content_identity import analyze, preference
 
-VERSION = '0.5.4'
+VERSION = '0.5.5'
 
 
 class Bridge:
@@ -1135,9 +1135,8 @@ class Bridge:
             if job['expected'] is not None and len(plan) >= job['expected'] and not job.get('pending_group_clicks'):
                 break
         self.store.set_source_entries(job['id'], [source_entry(m, i) for i, m in enumerate(plan, 1)])
-        # Inspect all batches first so original/native entries arrive before
-        # attachment duplicates. This stores metadata only, not media bytes.
-        plan.sort(key=lambda m: bool(getattr(getattr(m, 'media', None), 'video', False)), reverse=True)
+        # Upload in the same source order used for browsing. Native-video
+        # preference belongs to duplicate selection, not transfer scheduling.
         job['audit_total'] = len(plan)
         for index, message in enumerate(plan, 1):
             job['audit_index'] = index
