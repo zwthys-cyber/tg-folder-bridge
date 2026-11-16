@@ -120,3 +120,31 @@ class Spool(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SpoolBusyError):
             MediaSpool(self.root, 16, 1)
         self.assertTrue(active.exists())
+
+    async def test_parallel_download_keeps_disk_guard_and_cleans_on_low_space(self):
+        self.spool.close()
+        self.spool = MediaSpool(self.root, max_bytes=12*1024**2, reserve_bytes=1)
+        self.message.file.size = 11*1024**2
+        self.message.document = True
+        iterators = []
+
+        def iterate(*args, **kwargs):
+            iterator = NS(__anext__=AsyncMock(return_value=b'x'*(512*1024)), close=AsyncMock())
+            iterators.append(iterator)
+            return iterator
+
+        calls = 0
+
+        def space(*args):
+            nonlocal calls
+            calls += 1
+            return NS(free=50*1024**2 if calls == 1 else 0)
+
+        with patch('media_spool.shutil.disk_usage', side_effect=space):
+            with self.assertRaises(InsufficientDiskError):
+                async with self.spool.stage(NS(iter_download=iterate), self.message, workers=4):
+                    self.fail('disk reserve must not be exceeded')
+        self.assertTrue(iterators)
+        for iterator in iterators:
+            iterator.close.assert_awaited()
+        self.assert_empty()

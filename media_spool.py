@@ -6,6 +6,7 @@ import shutil
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
+from fast_download import download_file
 
 
 class InsufficientDiskError(RuntimeError):
@@ -72,7 +73,7 @@ class MediaSpool:
             self.lock.close()
 
     @asynccontextmanager
-    async def stage(self, client, message, progress=None):
+    async def stage(self, client, message, progress=None, workers=1, stats=None):
         size = getattr(getattr(message, 'file', None), 'size', None)
         if size is not None and size > self.max_bytes:
             raise MediaTooLargeError('Media exceeds configured limit')
@@ -87,10 +88,7 @@ class MediaSpool:
             path.touch(mode=0o600, exist_ok=False)
             raw = path.open('wb', buffering=0)
             with LimitedWriter(raw, self.root, self.max_bytes, self.reserve_bytes) as stream:
-                kwargs = dict(file=stream)
-                if progress is not None:
-                    kwargs['progress_callback'] = progress
-                await client.download_media(message, **kwargs)
+                await download_file(client, message, stream, progress=progress, workers=workers, stats=stats)
             actual = path.stat().st_size
             if actual == 0 or (size is not None and size > 0 and actual != size):
                 raise IncompleteMediaError('Downloaded media size does not match')

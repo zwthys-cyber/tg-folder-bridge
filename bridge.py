@@ -37,8 +37,9 @@ class Bridge:
         self.heic_previews = os.getenv('HEIC_PREVIEWS', '1') == '1'
         self.document_groups = os.getenv('DISPLAY_MODE', 'document_group') == 'document_group'
         self.upload_workers = int(os.getenv('UPLOAD_WORKERS', '3'))
-        if not 1 <= self.upload_workers <= 4 or self.transfer_pause < 0:
-            raise ValueError('UPLOAD_WORKERS must be 1..4; transfer pause must be nonnegative')
+        self.download_workers = int(os.getenv('DOWNLOAD_WORKERS', '4'))
+        if not 1 <= self.upload_workers <= 4 or not 1 <= self.download_workers <= 4 or self.transfer_pause < 0:
+            raise ValueError('Transfer workers must be 1..4; transfer pause must be nonnegative')
         if not self.owners or self.idle <= 0 or self.timeout <= 0:
             raise ValueError('OWNER_IDS 和超时配置无效')
         root = Path(os.getenv('DATA_DIR', 'data'))
@@ -92,6 +93,7 @@ class Bridge:
             raise RuntimeError('登录账号与 RELAY_USER_ID 不一致')
         self.destination = (await app.bot.get_me()).username
         print('文件转存模式：' + self.transfer_mode, flush=True)
+        print(f'下载并发：{self.download_workers}；上传并发：{self.upload_workers}', flush=True)
         print('中转账号 Premium：' + ('已开通' if getattr(me, 'premium', False) else '未开通'), flush=True)
         await self.update_menu(app.bot)
         self.client.add_event_handler(self.source_message, events.NewMessage(incoming=True))
@@ -412,6 +414,7 @@ class Bridge:
                     'InsufficientDiskError': '磁盘剩余空间不足，已停止并清理临时文件。',
                     'MediaTooLargeError': '单文件超过配置上限，已停止并清理临时文件。',
                     'IncompleteMediaError': '媒体下载不完整，已清理临时文件。',
+                    'DownloadCoverageError': '下载分块不完整，已停止并清理临时文件。',
                     'ChatForwardsRestrictedError': '源内容禁止转发；如需下载重传，请启用 download_upload 模式。',
                 }
                 detail = type(exc).__name__
@@ -445,13 +448,22 @@ class Bridge:
             eta = f'{max(0, total-current) / rate / 60:.1f} 分钟' if total and rate > 0 else '估算中'
             detail = (f'{label}：{current / 1024**2:.1f} / {total_text} {percent}\n'
                       f'平均速度 {rate / 1024**2:.2f} MiB/s；此阶段剩余约 {eta}')
+            if label == '下载':
+                metrics = job.get('download_stats', {})
+                detail += f"\n下载并发 {metrics.get('workers', 1)} 路"
+                if metrics.get('parts'):
+                    detail += f"；分块平均等待 {1000 * metrics['wait_seconds'] / metrics['parts']:.0f} ms"
+                if metrics.get('mode') == 'sdk_fallback':
+                    detail += '（CDN/文件引用兼容回退）'
             self.store.update(job['id'], 'running', job['expected'], detail)
         return callback
 
     async def transfer_media(self, message, key, job, preview_only=False, replace_original=False):
         if self.transfer_mode == 'download_upload':
             self.store.update(job['id'], 'running', job['expected'], '正在下载一个文件到临时目录。')
-            async with self.spool.stage(self.client, message, progress=self.progress(job, '下载')) as path:
+            job['download_stats'] = {}
+            async with self.spool.stage(self.client, message, progress=self.progress(job, '下载'),
+                                        workers=self.download_workers, stats=job['download_stats']) as path:
                 preview = None
                 thumbnail = None
                 if self.heic_previews:
