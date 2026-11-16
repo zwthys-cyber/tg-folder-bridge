@@ -41,7 +41,8 @@ def folder_details(job, items):
         total = '未知'
     else:
         size = sum(sizes)
-        divisor, unit = (1_000_000_000, 'GB') if size >= 1_000_000_000 else (1_000_000, 'MB')
+        # Use the same binary-size display convention as Telegram's files.
+        divisor, unit = (1024**3, 'GB') if size >= 1024**3 else (1024**2, 'MB')
         total = f'{size/divisor:.2f} {unit}'
     # The source convention counts the folder information message as one
     # message in addition to its media entries; navigation is not included.

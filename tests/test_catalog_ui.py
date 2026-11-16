@@ -36,9 +36,9 @@ class Catalog(unittest.IsolatedAsyncioTestCase):
         self.assertIn('第 1/2 组', bot.send_message.call_args_list[-1].args[1])
 
     async def test_details_count_original_media_types_and_real_sizes(self):
-        items = [dict(kind='document', source_kind='photo', file_size=1_000_000),
-                 dict(kind='document', source_kind='video', file_size=2_000_000),
-                 dict(kind='document', source_kind='document', file_size=250_000)]
+        items = [dict(kind='document', source_kind='photo', file_size=1024**2),
+                 dict(kind='document', source_kind='video', file_size=2*1024**2),
+                 dict(kind='document', source_kind='document', file_size=262144)]
         text = folder_details(dict(id='job', title='示例', source_created_at='2026-11-17 00:35',
                                    source_updated_at='2026-11-17 00:36'), items)
         for expected in ('消息数：4 条', '图片数：1 张', '视频数：1 个', '文档数：1 个',
