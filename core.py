@@ -74,7 +74,7 @@ class Store:
         job_columns = {x['name'] for x in self.db.execute('PRAGMA table_info(jobs)')}
         if 'title' not in job_columns:
             self.db.execute("ALTER TABLE jobs ADD COLUMN title TEXT DEFAULT ''")
-        self.db.execute("UPDATE jobs SET state='interrupted' WHERE state IN ('queued','running')")
+        self.db.execute("UPDATE jobs SET state='interrupted' WHERE state IN ('queued','running','cooldown')")
         self.db.commit()
 
     def create(self, job, owner, link):

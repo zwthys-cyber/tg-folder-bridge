@@ -6,7 +6,7 @@ from pathlib import Path
 from telethon import functions, types
 
 
-async def upload_file(client, path, progress, workers=32, worker_limit=None, stats=None):
+async def upload_file(client, path, progress, workers=8, worker_limit=None, stats=None):
     path = Path(path)
     size = path.stat().st_size
     if not 1 <= workers <= 32:

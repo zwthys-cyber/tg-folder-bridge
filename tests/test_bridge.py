@@ -393,3 +393,84 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ApplicationHandlerStop):
             await self.bridge.speed(update, NS(args=['32', '32']))
         self.assertFalse(self.bridge.settings_file.exists())
+
+    async def test_429_cools_down_reconnects_then_replays_with_saved_files(self):
+        from telethon.errors import InvalidBufferError
+        from transport_recovery import Cooldown
+        self.bridge.transfer_mode = 'download_upload'
+        self.bridge.download_workers = self.bridge.upload_workers = 32
+        self.job['expected'] = 63
+        self.bridge.store.add_file('job', (101, 3), NS(chat_id=7, message_id=99), 'saved', 'document')
+        self.bridge.client = NS(disconnect=AsyncMock())
+        operations, gates = [], []
+
+        async def operation(link, job):
+            operations.append(job['id'])
+            self.assertEqual(job['expected'], 63)
+            if len(operations) == 1:
+                job['phase'] = '上传'
+                self.bridge.blocked = True
+                raise InvalidBufferError((-429).to_bytes(4, 'little', signed=True))
+            self.assertEqual(len(self.bridge.store.files('job')), 1)
+
+        async def gate(job):
+            gates.append(self.bridge.cooldown.remaining())
+            self.bridge.cooldown.until = 0  # Simulate elapsed wall time, no real delay.
+
+        async def reconnect():
+            self.assertEqual(self.bridge.cooldown.remaining(), 0)
+            self.bridge.reconnect_required = False
+
+        self.bridge.collect = AsyncMock(side_effect=operation)
+        self.bridge.await_cooldown = AsyncMock(side_effect=gate)
+        self.bridge.connect_user = AsyncMock(side_effect=reconnect)
+        await self.bridge.collect_with_recovery('link', self.job)
+        self.assertEqual(operations, ['job', 'job'])
+        self.assertGreater(gates[1], 100)
+        self.assertEqual((self.bridge.download_workers, self.bridge.upload_workers), (8, 8))
+        self.bridge.client.disconnect.assert_awaited_once()
+        self.bridge.connect_user.assert_awaited_once()
+        self.assertFalse(self.bridge.blocked)
+        self.assertGreater(Cooldown(self.bridge.cooldown.path).remaining(), 100)
+
+    async def test_broken_connection_is_rebuilt_before_replaying(self):
+        self.bridge.transfer_mode = 'download_upload'
+        self.job['expected'] = 63
+        self.bridge.client = NS(disconnect=AsyncMock())
+        self.bridge.collect = AsyncMock(side_effect=[ConnectionError(), None])
+        self.bridge.await_cooldown = AsyncMock()
+        self.bridge.connect_user = AsyncMock()
+        await self.bridge.collect_with_recovery('link', self.job)
+        self.bridge.connect_user.assert_awaited_once()
+        self.assertEqual(self.bridge.collect.await_count, 2)
+        self.assertEqual(self.job['expected'], 63)
+
+    async def test_auth_transport_error_does_not_delete_or_recreate_session(self):
+        from telethon.errors import InvalidBufferError
+        self.bridge.collect = AsyncMock(side_effect=InvalidBufferError((-404).to_bytes(4, 'little', signed=True)))
+        self.bridge.connect_user = AsyncMock()
+        with self.assertRaises(InvalidBufferError):
+            await self.bridge.collect_with_recovery('link', self.job)
+        self.bridge.collect.assert_awaited_once()
+        self.bridge.connect_user.assert_not_awaited()
+        self.assertFalse(self.bridge.cooldown.path.exists())
+
+    async def test_known_expected_count_survives_an_early_failure(self):
+        self.bridge.store.update('job', 'partial', 63)
+        self.bridge.collect = AsyncMock(side_effect=ValueError('early failure'))
+        self.bridge.app = NS(bot=NS(send_message=AsyncMock()))
+        self.bridge.jobs.put_nowait('job')
+        worker = asyncio.create_task(self.bridge.work())
+        await self.bridge.jobs.join()
+        worker.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await worker
+        self.assertEqual(self.bridge.store.get('job')['expected'], 63)
+
+    async def test_cooling_job_cannot_be_queued_again(self):
+        self.bridge.store.update('job', 'cooldown', 63)
+        update = NS(effective_chat=NS(type='private'), effective_user=NS(id=7),
+                    message=NS(reply_text=AsyncMock()))
+        with self.assertRaises(ApplicationHandlerStop):
+            await self.bridge.resume(update, NS(args=['job']))
+        self.assertTrue(self.bridge.jobs.empty())

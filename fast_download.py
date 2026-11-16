@@ -30,7 +30,7 @@ class DownloadCoverageError(RuntimeError):
     pass
 
 
-async def download_file(client, message, stream, progress=None, workers=32, stats=None, worker_limit=None):
+async def download_file(client, message, stream, progress=None, workers=8, stats=None, worker_limit=None):
     if not 1 <= workers <= 32:
         raise ValueError('DOWNLOAD_WORKERS must be between 1 and 32')
     stats = stats if stats is not None else {}

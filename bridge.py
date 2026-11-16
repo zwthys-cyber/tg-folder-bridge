@@ -18,6 +18,7 @@ from previews import document_thumbnail, make_jpeg_preview
 from fast_upload import upload_file
 from catalog_ui import catalog_page, send_file_page
 import transfer_settings
+from transport_recovery import Cooldown, error_detail, rate_wait
 
 
 class Bridge:
@@ -37,8 +38,8 @@ class Bridge:
         self.transfer_pause = float(os.getenv('TRANSFER_PAUSE_SECONDS', '0.2'))
         self.heic_previews = os.getenv('HEIC_PREVIEWS', '1') == '1'
         self.document_groups = os.getenv('DISPLAY_MODE', 'document_group') == 'document_group'
-        self.upload_workers = int(os.getenv('UPLOAD_WORKERS', '32'))
-        self.download_workers = int(os.getenv('DOWNLOAD_WORKERS', '32'))
+        self.upload_workers = int(os.getenv('UPLOAD_WORKERS', '8'))
+        self.download_workers = int(os.getenv('DOWNLOAD_WORKERS', '8'))
         if self.transfer_pause < 0:
             raise ValueError('Transfer pause must be nonnegative')
         if not self.owners or self.idle <= 0 or self.timeout <= 0:
@@ -48,6 +49,8 @@ class Bridge:
         self.settings_file = root / 'performance.json'
         self.download_workers, self.upload_workers = transfer_settings.load(
             self.settings_file, self.download_workers, self.upload_workers)
+        self.cooldown = Cooldown(root / 'rate-limit.json')
+        self.reconnect_required = False
         self.transfer_mode = os.getenv('TRANSFER_MODE', 'forward')
         if self.transfer_mode not in {'forward', 'download_upload'}:
             raise ValueError('TRANSFER_MODE must be forward or download_upload')
@@ -88,6 +91,27 @@ class Bridge:
 
     async def start(self, app):
         self.app = app
+        if self.cooldown.remaining():
+            self.reconnect_required = True
+            print('用户连接正在限流冷却，冷却后再恢复。', flush=True)
+        else:
+            try:
+                await self.connect_user()
+            except Exception as exc:
+                if not self.defer_transport(exc, 0):
+                    raise
+                await self.client.disconnect()
+                self.reconnect_required = True
+                print('用户连接暂不可用，已进入冷却；管理命令仍可使用。', flush=True)
+        self.destination = (await app.bot.get_me()).username
+        print('文件转存模式：' + self.transfer_mode, flush=True)
+        print(f'下载并发：{self.download_workers}；上传并发：{self.upload_workers}', flush=True)
+        await self.update_menu(app.bot)
+        self.client.add_event_handler(self.source_message, events.NewMessage(incoming=True))
+        self.client.add_event_handler(self.source_message, events.MessageEdited(incoming=True))
+        self.worker = asyncio.create_task(self.work())
+
+    async def connect_user(self):
         await self.client.connect()
         if not await self.client.is_user_authorized():
             await self.client.disconnect()
@@ -96,14 +120,8 @@ class Bridge:
         if me.bot or me.id != self.relay_id:
             await self.client.disconnect()
             raise RuntimeError('登录账号与 RELAY_USER_ID 不一致')
-        self.destination = (await app.bot.get_me()).username
-        print('文件转存模式：' + self.transfer_mode, flush=True)
-        print(f'下载并发：{self.download_workers}；上传并发：{self.upload_workers}', flush=True)
         print('中转账号 Premium：' + ('已开通' if getattr(me, 'premium', False) else '未开通'), flush=True)
-        await self.update_menu(app.bot)
-        self.client.add_event_handler(self.source_message, events.NewMessage(incoming=True))
-        self.client.add_event_handler(self.source_message, events.MessageEdited(incoming=True))
-        self.worker = asyncio.create_task(self.work())
+        self.reconnect_required = False
 
     async def update_menu(self, bot):
         public = [BotCommand('start', '查看文件夹列表'), BotCommand('catalog', '浏览文件夹'),
@@ -294,6 +312,8 @@ class Bridge:
             ('设置已保存。' if context.args else '调整：/speed 下载并发 上传并发（1–32）。') +
             '进行中的并发传输会在后续分块采用新上限，已发出的请求正常完成。\n'
             '小文件和兼容回退仍使用单路；并发越高不保证越快。')
+        if self.cooldown.remaining():
+            await update.message.reply_text(f'当前连接仍需冷却约 {self.cooldown.remaining():.0f} 秒，修改并发不会提前解除冷却。')
         raise ApplicationHandlerStop
 
     async def resume(self, update, context):
@@ -304,8 +324,8 @@ class Bridge:
             await update.message.reply_text('用法：/resume 原任务编号')
         elif self.blocked or self.jobs.full():
             await update.message.reply_text('服务暂不能接收续传任务；收件未确认时请先重启。')
-        elif job['state'] in {'queued', 'running'}:
-            await update.message.reply_text('此任务仍在排队或运行，请用 /status 查看。')
+        elif job['state'] in {'queued', 'running', 'cooldown'}:
+            await update.message.reply_text('此任务正在排队、运行或冷却，无需重复续传，请用 /status 查看。')
         else:
             self.store.update(job['id'], 'queued', job['expected'])
             self.jobs.put_nowait(job['id'])
@@ -407,6 +427,58 @@ class Bridge:
             except Exception as exc:
                 job['button_error'] = exc
 
+    def defer_transport(self, error, attempt):
+        wait = rate_wait(error, attempt)
+        connection = isinstance(error, ConnectionError)
+        if wait is None and not connection:
+            return False
+        if wait is not None:
+            self.download_workers = max(1, min(8, self.download_workers // 2))
+            self.upload_workers = max(1, min(8, self.upload_workers // 2))
+            transfer_settings.save(self.settings_file, self.download_workers, self.upload_workers)
+            self.cooldown.defer(wait, error_detail(error))
+        elif not self.cooldown.remaining():
+            self.cooldown.defer(5 * 2**attempt, error_detail(error))
+        return True
+
+    async def await_cooldown(self, job):
+        while self.cooldown.remaining() > 0:
+            seconds = self.cooldown.remaining()
+            self.store.update(job['id'], 'cooldown', job['expected'],
+                f'{self.cooldown.reason}\n自动冷却，还需约 {seconds:.0f} 秒。\n'
+                f'下载并发 {self.download_workers}；上传并发 {self.upload_workers}。冷却结束后自动继续。')
+            await asyncio.sleep(min(10, seconds))
+
+    async def collect_with_recovery(self, link, job):
+        for attempt in range(3):
+            try:
+                await self.await_cooldown(job)
+                if self.reconnect_required:
+                    await self.connect_user()
+                self.store.update(job['id'], 'running', job['expected'])
+                job['phase'] = '获取文件列表'
+                return await self.collect(link, job)
+            except Exception as exc:
+                button_error = job.get('button_error')
+                if button_error and rate_wait(button_error, attempt) is not None:
+                    exc = button_error
+                if not self.defer_transport(exc, attempt):
+                    raise exc
+                detail = error_detail(exc, job.get('phase', ''))
+                print(f"任务 {job['id']}：{detail}", flush=True)
+                await self.client.disconnect()
+                self.reconnect_required = True
+                if self.transfer_mode != 'download_upload' and self.blocked:
+                    raise  # Unknown late forwards cannot be safely attributed.
+                self.pending = None
+                self.blocked = False  # Reuploaded messages use unique receipt tokens.
+                if attempt == 2:
+                    raise exc
+                job_id, expected = job['id'], job['expected']
+                job.clear()
+                job.update(id=job_id, expected=expected, chats=set(), baselines={},
+                           events=asyncio.Queue(maxsize=5000), overflow=False)
+
     async def work(self):
         while True:
             job_id = await self.jobs.get()
@@ -415,12 +487,12 @@ class Bridge:
                 self.jobs.task_done()
                 continue
             row = self.store.get(job_id)
-            job = dict(id=job_id, expected=None, chats=set(), baselines={},
+            job = dict(id=job_id, expected=row['expected'], chats=set(), baselines={},
                        events=asyncio.Queue(maxsize=5000), overflow=False)
             self.active = job
-            self.store.update(job_id, 'running')
+            self.store.update(job_id, 'running', job['expected'])
             try:
-                await asyncio.wait_for(self.collect(row['link'], job), self.timeout)
+                await asyncio.wait_for(self.collect_with_recovery(row['link'], job), self.timeout)
                 n = len(self.store.files(job_id))
                 complete = job['expected'] is not None and n == job['expected']
                 detail = '' if complete else '发送已静默，无法确认全部文件已收到。'
@@ -443,9 +515,12 @@ class Bridge:
                     'DownloadCoverageError': '下载分块不完整，已停止并清理临时文件。',
                     'ChatForwardsRestrictedError': '源内容禁止转发；如需下载重传，请启用 download_upload 模式。',
                 }
-                detail = type(exc).__name__
-                if detail in explanations:
-                    detail += '：' + explanations[detail]
+                name = type(exc).__name__
+                detail = error_detail(exc, job.get('phase', ''))
+                if name in explanations:
+                    detail += '：' + explanations[name]
+                if self.cooldown.remaining():
+                    detail += f'；连接冷却还剩约 {self.cooldown.remaining():.0f} 秒，续传会等待冷却。'
                 self.store.update(job_id, 'partial' if self.store.files(job_id) else 'failed',
                                   job['expected'], detail)
             finally:
@@ -491,6 +566,7 @@ class Bridge:
 
     async def transfer_media(self, message, key, job, preview_only=False, replace_original=False):
         if self.transfer_mode == 'download_upload':
+            job['phase'] = '下载'
             self.store.update(job['id'], 'running', job['expected'], '正在下载一个文件到临时目录。')
             job['download_stats'] = {}
             async with self.spool.stage(self.client, message, progress=self.progress(job, '下载'),
@@ -513,6 +589,7 @@ class Bridge:
                             raise
                         job['preview_warnings'] = True
                 marker = f"bridge:{job['id']}:{uuid.uuid4().hex}"
+                job['phase'] = '上传'
                 self.store.update(job['id'], 'running', job['expected'], '正在上传文件，确认收件后立即删除临时文件。')
                 # Keep filename/ordinary video/audio metadata. Round videos and
                 # stickers are sent as ordinary attachments so a receipt caption
@@ -550,12 +627,14 @@ class Bridge:
                     workers=self.upload_workers, worker_limit=lambda: self.upload_workers,
                     stats=self.active['upload_stats'])
                 self.store.update(self.active['id'], 'running', self.active['expected'], '上传完成，等待机器人确认收件。')
+                self.active['phase'] = '发送媒体消息'
                 await self.client.send_file(
                     self.destination, uploaded, caption=marker, parse_mode=None,
                     force_document=not preview and (self.document_groups or not bool(message.photo)), attributes=attrs or None,
                     thumb=str(thumbnail) if thumbnail else None,
                     supports_streaming=any(isinstance(a, types.DocumentAttributeVideo)
                                            for a in attrs or []))
+            self.active['phase'] = '确认机器人收件'
             await asyncio.wait_for(future, 60)
         except BaseException:
             # Do not attribute a late send/forward receipt to another task.
@@ -662,9 +741,12 @@ class Bridge:
                 if job.get('pending_group_clicks'):
                     continue
                 return
-            if job['expected'] is None:
-                job['expected'] = media_count(message.raw_text or '')
-                self.store.update(job['id'], 'running', job['expected'])
+            if not job.get('expected_refreshed'):
+                expected = media_count(message.raw_text or '')
+                if expected is not None:
+                    job['expected'] = expected
+                    job['expected_refreshed'] = True
+                    self.store.update(job['id'], 'running', expected)
             if not self.store.get(job['id']).get('title'):
                 title = folder_title(message.raw_text or '')
                 if title:
