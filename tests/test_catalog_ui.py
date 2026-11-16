@@ -11,7 +11,7 @@ class Catalog(unittest.IsolatedAsyncioTestCase):
         self.assertIn('共 12 个文件夹', text)
         self.assertIn('文件夹0（1 个文件）', text)
         self.assertEqual(keyboard.inline_keyboard[0][0].callback_data, 'bridge_open:job0:1')
-        self.assertEqual(keyboard.inline_keyboard[-2][0].callback_data, 'bridge_catalog:2')
+        self.assertEqual(keyboard.inline_keyboard[-1][0].callback_data, 'bridge_catalog:2')
         text, keyboard = catalog_page(rows, 2)
         self.assertIn('11. 📁 文件夹10', text)
         self.assertEqual(keyboard.inline_keyboard[0][0].text, '11')

@@ -28,8 +28,8 @@ def catalog_page(rows, page=1, page_callback_prefix='bridge_catalog', favorites=
         buttons.append(navigation)
     if not rows:
         body.append('你还没有收藏文件夹。' if favorites else '暂时没有已导入完成的文件夹，请稍后查看。')
-    buttons.append([InlineKeyboardButton('📁 文件夹列表' if favorites else '⭐ 我的收藏',
-                    callback_data='bridge_catalog:1' if favorites else 'bridge_favorites:1')])
+    if favorites:
+        buttons.append([InlineKeyboardButton('📁 文件夹列表', callback_data='bridge_catalog:1')])
     return '\n\n'.join(body), InlineKeyboardMarkup(buttons)
 
 
