@@ -44,7 +44,8 @@ class Routing(unittest.TestCase):
 
 class Lifecycle(unittest.TestCase):
     def test_feed_raw_update_without_starting_an_updater(self):
-        bridge = NS(relay_id=7, install=Mock(), start=AsyncMock(), stop=AsyncMock())
+        bridge = NS(relay_id=7, install=Mock(), start=AsyncMock(), stop=AsyncMock(),
+                    search_text=AsyncMock(return_value=False))
         app = NS(bot=Bot('123456:TEST_TOKEN'), initialize=AsyncMock(),
                  start=AsyncMock(), stop=AsyncMock(), shutdown=AsyncMock(),
                  process_update=AsyncMock(), running=True)
@@ -59,6 +60,10 @@ class Lifecycle(unittest.TestCase):
                 try:
                     adapter.start()
                     self.assertFalse(adapter.handle_update(raw_message('/search example')))
+                    self.assertFalse(adapter.handle_update(raw_message('普通关键词')))
+                    bridge.search_text.assert_awaited_once_with(7, 7, '普通关键词')
+                    bridge.search_text.return_value = True
+                    self.assertTrue(adapter.handle_update(raw_message('文件夹名称')))
                     app.process_update.assert_not_awaited()
                     self.assertTrue(adapter.handle_update(raw_message('/folders')))
                     app.process_update.assert_awaited_once()

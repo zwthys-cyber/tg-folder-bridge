@@ -60,6 +60,7 @@ class Bridge:
         self.pending = None
         self.blocked = False
         self.worker = None
+        self.search_sessions = {}
 
     def install(self, app):
         # Negative group runs before ordinary existing bot handlers. Reserve -100.
@@ -74,9 +75,10 @@ class Bridge:
         app.add_handler(CommandHandler('status', self.status), group=-100)
         app.add_handler(CommandHandler('resume', self.resume), group=-100)
         app.add_handler(CallbackQueryHandler(self.original, pattern=r'^bridge_original:'), group=-100)
-        app.add_handler(CallbackQueryHandler(self.catalog_callback, pattern=r'^bridge_(catalog|open):'), group=-100)
+        app.add_handler(CallbackQueryHandler(self.catalog_callback, pattern=r'^bridge_(catalog|open|search):'), group=-100)
         app.add_handler(MessageHandler(filters.Regex(r'^https://t\.me/\w+\?start='),
                                        self.fetch), group=-100)
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.search_command), group=-100)
 
     async def start(self, app):
         self.app = app
@@ -122,11 +124,29 @@ class Bridge:
     async def help_command(self, update, context):
         if update.effective_chat.type != 'private':
             raise ApplicationHandlerStop
-        text = '发送 /start 查看文件夹列表，点击编号打开文件夹。\n文件按组显示缩略图、文件名和大小。\n直接发送关键词仍可搜索原收录资源。'
+        text = '发送 /start 查看文件夹列表，点击编号打开文件夹。\n文件按组显示缩略图、文件名和大小。\n直接发送关键词搜索文件夹名称，也可搜索原收录资源。'
         if update.effective_user.id in self.owners:
             text += '\n\n管理员：\n/fetch 分享链接\n/folders 导入任务\n/status 任务编号\n/resume 任务编号\n/add 标题 | 链接 | 关键词\n/delete 编号'
         await update.message.reply_text(text)
         raise ApplicationHandlerStop
+
+    async def search_text(self, chat, uid, query):
+        rows = self.store.search_catalog(query, uid, owned=uid in self.owners)
+        if not rows:
+            return False
+        if len(self.search_sessions) >= 1000:
+            self.search_sessions.pop(next(iter(self.search_sessions)))
+        token = uuid.uuid4().hex[:16]
+        self.search_sessions[token] = (uid, query)
+        text, markup = catalog_page(rows, page_callback_prefix=f'bridge_search:{token}')
+        await self.app.bot.send_message(chat, f'搜索：{query}\n\n{text}', reply_markup=markup)
+        return True
+
+    async def search_command(self, update, context):
+        text = (update.message.text or '').strip()
+        if update.effective_chat.type == 'private' and 0 < len(text) <= 100:
+            if await self.search_text(update.effective_chat.id, update.effective_user.id, text):
+                raise ApplicationHandlerStop
 
     async def catalog_callback(self, update, context):
         query = update.callback_query
@@ -139,6 +159,15 @@ class Bridge:
                 await query.answer()
                 text, markup = catalog_page(self.store.catalog(), page)
                 await query.edit_message_text(text, reply_markup=markup)
+            elif parts[0] == 'bridge_search':
+                session = self.search_sessions.get(parts[1])
+                if not session or session[0] != update.effective_user.id:
+                    await query.answer('搜索已过期，请重新输入关键词', show_alert=True)
+                    raise ApplicationHandlerStop
+                rows = self.store.search_catalog(session[1], session[0], owned=session[0] in self.owners)
+                text, markup = catalog_page(rows, int(parts[2]), f'bridge_search:{parts[1]}')
+                await query.answer()
+                await query.edit_message_text(f'搜索：{session[1]}\n\n{text}', reply_markup=markup)
             else:
                 job = self.store.get(parts[1])
                 if not self.can_view(job, update.effective_user.id):

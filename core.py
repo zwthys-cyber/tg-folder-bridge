@@ -121,6 +121,15 @@ class Store:
             GROUP BY jobs.id ORDER BY jobs.rowid DESC
         ''')]
 
+    def search_catalog(self, query, uid, owned=False):
+        return [dict(x) for x in self.db.execute('''
+            SELECT jobs.*, count(files.file_id) AS file_count FROM jobs
+            JOIN files ON files.job=jobs.id
+            WHERE instr(lower(jobs.title), lower(?)) > 0
+              AND (jobs.state='complete' OR (? AND jobs.owner=?))
+            GROUP BY jobs.id ORDER BY jobs.rowid DESC
+        ''', (query, int(owned), uid))]
+
     def add_file(self, job, source, message, file_id, kind, caption=None, source_media_key='', has_thumbnail=False, replace=False):
         if replace:
             self.db.execute('''UPDATE files SET chat=?,message=?,file_id=?,kind=?,caption=?,

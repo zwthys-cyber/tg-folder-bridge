@@ -365,3 +365,15 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         await self.bridge.source_message(NS(id=5, chat_id=101, message=message))
         handler.assert_awaited_once_with(message, next_groups_only=True)
         self.assertIs(self.job['events'].get_nowait(), message)
+
+    async def test_folder_search_includes_names_but_hides_unfinished_from_public(self):
+        self.bridge.store.set_title('job', '测试文件夹1047')
+        self.bridge.store.add_file('job', (1, 2), NS(chat_id=7, message_id=9), 'file', 'document')
+        self.assertEqual(self.bridge.store.search_catalog('测试', 999), [])
+        self.assertEqual(len(self.bridge.store.search_catalog('1047', 7, owned=True)), 1)
+        self.bridge.store.update('job', 'complete', 1)
+        self.assertEqual(len(self.bridge.store.search_catalog('测试', 999)), 1)
+        self.bridge.app = NS(bot=NS(send_message=AsyncMock()))
+        self.assertTrue(await self.bridge.search_text(999, 999, '1047'))
+        self.assertIn('测试文件夹1047', self.bridge.app.bot.send_message.call_args.args[1])
+        self.assertFalse(await self.bridge.search_text(999, 999, '其他关键词'))

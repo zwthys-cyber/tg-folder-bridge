@@ -2,7 +2,7 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaDocument
 
 
-def catalog_page(rows, page=1):
+def catalog_page(rows, page=1, page_callback_prefix='bridge_catalog'):
     pages = max(1, (len(rows) + 9) // 10)
     page = max(1, min(page, pages))
     start = (page - 1) * 10
@@ -11,16 +11,17 @@ def catalog_page(rows, page=1):
     buttons = []
     for i, row in enumerate(selected, start + 1):
         title = row['title'] or ('文件夹 ' + row['id'][:8])
-        body.append(f"{i}. 📁 {title}（{row['file_count']} 个文件）")
+        pending = '，导入未完成' if row.get('state', 'complete') != 'complete' else ''
+        body.append(f"{i}. 📁 {title}（{row['file_count']} 个文件{pending}）")
     for offset in range(0, len(selected), 5):
         buttons.append([InlineKeyboardButton(str(start + offset + i + 1),
                         callback_data=f"bridge_open:{row['id']}:1")
                         for i, row in enumerate(selected[offset:offset + 5])])
     navigation = []
     if page > 1:
-        navigation.append(InlineKeyboardButton('⬅️ 上一页', callback_data=f'bridge_catalog:{page-1}'))
+        navigation.append(InlineKeyboardButton('⬅️ 上一页', callback_data=f'{page_callback_prefix}:{page-1}'))
     if page < pages:
-        navigation.append(InlineKeyboardButton('下一页 ➡️', callback_data=f'bridge_catalog:{page+1}'))
+        navigation.append(InlineKeyboardButton('下一页 ➡️', callback_data=f'{page_callback_prefix}:{page+1}'))
     if navigation:
         buttons.append(navigation)
     if not rows:

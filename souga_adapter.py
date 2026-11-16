@@ -17,7 +17,7 @@ from bridge import Bridge
 def is_bridge_update(raw, relay_id):
     callback = raw.get('callback_query', {})
     if (isinstance(callback.get('data'), str)
-            and callback['data'].startswith(('bridge_original:', 'bridge_catalog:', 'bridge_open:'))
+            and callback['data'].startswith(('bridge_original:', 'bridge_catalog:', 'bridge_open:', 'bridge_search:'))
             and callback.get('message', {}).get('chat', {}).get('type') == 'private'):
         return True
     message = raw.get('message')
@@ -98,6 +98,11 @@ class SougaBridge:
         if not self.bridge or not self.app:
             raise RuntimeError('请先调用 SougaBridge.start()')
         if not is_bridge_update(raw, self.bridge.relay_id):
+            message = raw.get('message', {})
+            text = message.get('text', '').strip()
+            if (message.get('chat', {}).get('type') == 'private' and 0 < len(text) <= 100
+                    and not text.startswith('/')):
+                return self._submit(self.bridge.search_text(message['chat']['id'], message['from']['id'], text))
             return False
 
         async def process():
