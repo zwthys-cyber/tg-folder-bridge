@@ -1,0 +1,22 @@
+[Unit]
+Description=Telegram folder cloud relay
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=tgbridge
+Group=tgbridge
+WorkingDirectory=/opt/tg-folder-bridge
+ExecStart=/opt/tg-folder-bridge/.venv/bin/python /opt/tg-folder-bridge/main.py
+Restart=on-failure
+RestartSec=15
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/tg-folder-bridge/data
+
+[Install]
+WantedBy=multi-user.target

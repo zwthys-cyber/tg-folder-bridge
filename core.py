@@ -39,6 +39,9 @@ class Store:
                 PRIMARY KEY(job, source_chat, source_message)
             );
         ''')
+        columns = {x['name'] for x in self.db.execute('PRAGMA table_info(files)')}
+        if 'caption' not in columns:
+            self.db.execute("ALTER TABLE files ADD COLUMN caption TEXT DEFAULT ''")
         self.db.execute("UPDATE jobs SET state='interrupted' WHERE state IN ('queued','running')")
         self.db.commit()
 
@@ -60,7 +63,14 @@ class Store:
         return [dict(x) for x in self.db.execute(
             'SELECT * FROM files WHERE job=? ORDER BY rowid', (job,))]
 
+    def list_jobs(self, owner, limit=20):
+        return [dict(x) for x in self.db.execute(
+            'SELECT * FROM jobs WHERE owner=? ORDER BY rowid DESC LIMIT ?', (owner, limit))]
+
     def add_file(self, job, source, message, file_id, kind):
-        self.db.execute('INSERT OR IGNORE INTO files VALUES(?,?,?,?,?,?,?)',
-                        (job, *source, message.chat_id, message.message_id, file_id, kind))
+        self.db.execute('''INSERT OR IGNORE INTO files
+            (job,source_chat,source_message,chat,message,file_id,kind,caption)
+            VALUES(?,?,?,?,?,?,?,?)''',
+            (job, *source, message.chat_id, message.message_id, file_id, kind,
+             getattr(message, 'caption', None) or ''))
         self.db.commit()

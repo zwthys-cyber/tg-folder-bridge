@@ -7,6 +7,7 @@ import os
 import re
 import uuid
 from pathlib import Path
+from telegram.error import BadRequest, RetryAfter
 from telegram.ext import ApplicationHandlerStop, CommandHandler, MessageHandler, filters
 from telethon import TelegramClient, events
 from core import Store, media_count, parse_link
@@ -41,6 +42,7 @@ class Bridge:
                                        self.receive_file), group=-100)
         app.add_handler(CommandHandler('fetch', self.fetch), group=-100)
         app.add_handler(CommandHandler('folder', self.folder), group=-100)
+        app.add_handler(CommandHandler('folders', self.folders), group=-100)
         app.add_handler(MessageHandler(filters.Regex(r'^https://t\.me/\w+\?start='),
                                        self.fetch), group=-100)
 
@@ -112,9 +114,37 @@ class Bridge:
             f"已保存 {len(files)} / 预期 {job['expected'] if job['expected'] is not None else '未知'} 个文件\n"
             f"{job['detail']}\n第 {page} 页，共 {max(1, (len(files)+9)//10)} 页")
         for item in files[(page-1)*10:page*10]:
-            await context.bot.copy_message(update.effective_chat.id, item['chat'], item['message'])
+            try:
+                await self.send_stored(context.bot, update.effective_chat.id, item)
+            except BadRequest:
+                await update.message.reply_text('一个文件无法通过 Telegram 重新发送，其余文件继续处理。')
             await asyncio.sleep(1)
         raise ApplicationHandlerStop
+
+    async def folders(self, update, context):
+        if update.effective_chat.type != 'private' or update.effective_user.id not in self.owners:
+            raise ApplicationHandlerStop
+        jobs = self.store.list_jobs(update.effective_user.id)
+        text = '\n\n'.join(f"{x['state']}\n/folder {x['id']}" for x in jobs)
+        await update.message.reply_text(text or '还没有文件夹。发送分享链接即可导入。')
+        raise ApplicationHandlerStop
+
+    async def send_stored(self, bot, chat_id, item):
+        # Use this bot's own file_id: retrieval survives deletion of the inbox message.
+        kind = item['kind']
+        if kind not in {'photo', 'video', 'document', 'animation', 'audio', 'voice', 'video_note'}:
+            raise ValueError('Unsupported stored media type')
+        kwargs = dict(chat_id=chat_id, **{kind: item['file_id']})
+        if kind != 'video_note':
+            kwargs['caption'] = item.get('caption', '')[:1024]
+            kwargs['parse_mode'] = None
+        method = getattr(bot, f'send_{kind}')
+        try:
+            return await method(**kwargs)
+        except RetryAfter as exc:
+            delay = exc.retry_after
+            await asyncio.sleep(delay.total_seconds() + 1 if hasattr(delay, 'total_seconds') else delay + 1)
+            return await method(**kwargs)
 
     async def receive_file(self, update, context):
         message = update.effective_message
@@ -162,6 +192,9 @@ class Bridge:
                 complete = job['expected'] is not None and n == job['expected']
                 self.store.update(job_id, 'complete' if complete else 'needs_review', job['expected'],
                                   '' if complete else '发送已静默，无法确认全部文件已收到。')
+            except asyncio.CancelledError:
+                self.store.update(job_id, 'interrupted', job['expected'])
+                raise
             except Exception as exc:
                 # Do not log links, session secrets, or raw Telegram response contents.
                 self.store.update(job_id, 'partial' if self.store.files(job_id) else 'failed',

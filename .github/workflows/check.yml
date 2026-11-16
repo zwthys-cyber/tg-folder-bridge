@@ -20,3 +20,20 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python -m compileall -q core.py bridge.py main.py login.py tests
       - run: python -m unittest discover -s tests -v
+  package:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package tracked source only
+        run: |
+          mkdir -p dist
+          git archive --format=zip --prefix=tg-folder-bridge/ -o dist/tg-folder-bridge.zip HEAD
+          cd dist
+          sha256sum tg-folder-bridge.zip > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tg-folder-bridge
+          path: dist/
+          retention-days: 30
