@@ -110,6 +110,8 @@ def handle(update):
             '文件夹转存（仅授权用户）：\n'
             '/fetch 分享链接\n'
             '/folders 查看最近任务\n'
+            '/status 任务编号 查看传输速度和进度\n'
+            '/resume 任务编号 续传或补充 HEIC 预览\n'
             '/folder 任务编号 [页码] 取回文件'
         )
 
@@ -158,7 +160,7 @@ def handle(update):
         return send(chat, '已删除。' if cursor.rowcount else '没有这个编号。')
 
     # Reached only if the bridge could not start; ordinary search still works.
-    if command in ('/fetch', '/folder', '/folders') or (
+    if command in ('/fetch', '/folder', '/folders', '/status', '/resume') or (
         text.startswith('https://t.me/') and '?start=' in text
     ):
         return send(chat, '文件转存模块未启动，请检查 sougabot 服务日志和转存配置。')

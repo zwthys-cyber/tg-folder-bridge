@@ -18,7 +18,7 @@ def raw_message(text='', user=7, **media):
 
 class Routing(unittest.TestCase):
     def test_commands_and_share_link_are_routed(self):
-        for text in ('/fetch https://t.me/epan?start=x', '/folders', '/folder id 2',
+        for text in ('/fetch https://t.me/epan?start=x', '/folders', '/folder id 2', '/status id', '/resume id',
                      'https://t.me/epan?start=x'):
             self.assertTrue(is_bridge_update(raw_message(text), 7))
 
@@ -26,6 +26,13 @@ class Routing(unittest.TestCase):
         for text in ('/start', '/search example', '普通搜索内容', '/folder_other'):
             self.assertFalse(is_bridge_update(raw_message(text), 7))
         self.assertFalse(is_bridge_update({'callback_query': {'id': 'abc'}}, 7))
+
+    def test_original_callback_is_routed_but_search_pagination_is_not(self):
+        query = {'callback_query': {'data': 'bridge_original:job:1:2',
+                                    'message': {'chat': {'type': 'private'}}}}
+        self.assertTrue(is_bridge_update(query, 7))
+        query['callback_query']['data'] = 'searchkey:5'
+        self.assertFalse(is_bridge_update(query, 7))
 
     def test_only_relay_media_is_intercepted(self):
         self.assertTrue(is_bridge_update(raw_message(user=7, video={}), 7))

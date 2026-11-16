@@ -178,7 +178,7 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
                    document=NS(attributes=[]), file=NS(size=4, ext='.mp4'))
         local_paths = []
 
-        async def download(message, file):
+        async def download(message, file, **kwargs):
             file.write(b'data')
 
         async def upload(destination, file, caption, **kwargs):
@@ -194,6 +194,7 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(path.exists())
 
         self.bridge.client = NS(download_media=AsyncMock(side_effect=download),
+                                upload_file=AsyncMock(side_effect=lambda file, **kwargs: file),
                                 send_file=AsyncMock(side_effect=upload),
                                 disconnect=AsyncMock())
         await self.bridge.transfer_media(media, (101, 3), self.job)
@@ -202,6 +203,8 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         saved = self.bridge.store.files('job')[0]
         self.assertEqual(saved['file_id'], 'uploaded-own-id')
         self.assertEqual(saved['caption'], '原始说明')
+        self.bridge.client.upload_file.assert_awaited_once()
+        self.assertEqual(self.bridge.client.upload_file.call_args.kwargs['part_size_kb'], 512)
 
     async def test_wrong_upload_marker_cannot_confirm_receipt(self):
         future = asyncio.get_running_loop().create_future()
@@ -214,3 +217,89 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(future.done())
         self.assertEqual(self.bridge.store.files('job'), [])
         future.cancel()
+
+    async def test_preview_receipt_does_not_increase_original_count(self):
+        original = NS(chat_id=7, message_id=99, caption='说明')
+        self.bridge.store.add_file('job', (101, 3), original, 'heic-original', 'document')
+        future = asyncio.get_running_loop().create_future()
+        self.bridge.pending = dict(source=(101, 3), future=future,
+                                   marker='preview-token', preview=True)
+        update = NS(effective_chat=NS(type='private'), effective_message=NS(
+            caption='preview-token', photo=[NS(file_id='jpeg-preview')],
+            chat_id=7, message_id=100))
+        with self.assertRaises(ApplicationHandlerStop):
+            await self.bridge.receive_file(update, None)
+        files = self.bridge.store.files('job')
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0]['file_id'], 'heic-original')
+        self.assertEqual(files[0]['preview_file_id'], 'jpeg-preview')
+        self.assertTrue(future.result())
+
+    async def test_retrieve_preview_with_original_button_and_original_download(self):
+        bot = NS(send_photo=AsyncMock(), send_document=AsyncMock())
+        item = dict(job='job', source_chat=101, source_message=3, kind='document',
+                    file_id='heic-original', preview_file_id='jpeg-preview', caption='说明')
+        await self.bridge.send_stored(bot, 7, item)
+        self.assertEqual(bot.send_photo.call_args.kwargs['photo'], 'jpeg-preview')
+        markup = bot.send_photo.call_args.kwargs['reply_markup']
+        self.assertEqual(markup.inline_keyboard[0][0].callback_data, 'bridge_original:job:101:3')
+        await self.bridge.send_stored(bot, 7, item, use_preview=False)
+        self.assertEqual(bot.send_document.call_args.kwargs['document'], 'heic-original')
+
+    async def test_progress_updates_persistent_status_without_sending_files(self):
+        with patch('bridge.time.monotonic', side_effect=[100, 102]):
+            progress = self.bridge.progress(self.job, '下载')
+            progress(1024**2, 2 * 1024**2)
+        row = self.bridge.store.get('job')
+        self.assertIn('50.0%', row['detail'])
+        self.assertIn('0.50 MiB/s', row['detail'])
+
+    async def test_resume_matches_media_ids_even_when_source_message_id_changes(self):
+        saved = NS(chat_id=7, message_id=99, caption='')
+        self.bridge.store.add_file('job', (101, 3), saved, 'stored-video', 'video')
+        old = NS(document=NS(id=12345), photo=None)
+        incoming = NS(chat_id=101, id=50, raw_text='', photo=None,
+                      document=NS(id=12345), buttons=[])
+
+        async def get_messages(entity, **kwargs):
+            return old if 'ids' in kwargs else [NS(id=49)]
+
+        async def send(*args):
+            await self.job['events'].put(incoming)
+
+        self.bridge.client = NS(get_entity=AsyncMock(return_value=NS(id=101, bot=True)),
+                                get_messages=AsyncMock(side_effect=get_messages),
+                                send_message=AsyncMock(side_effect=send), disconnect=AsyncMock())
+        self.bridge.transfer_media = AsyncMock()
+        await self.bridge.collect('https://t.me/epan?start=s_abc', self.job)
+        self.bridge.transfer_media.assert_not_awaited()
+        self.assertEqual(len(self.bridge.store.files('job')), 1)
+        self.assertEqual(self.bridge.store.files('job')[0]['media_key'], 'document:12345')
+
+    async def test_resume_heic_generates_only_preview_for_existing_original(self):
+        self.bridge.transfer_mode = 'download_upload'
+        saved = NS(chat_id=7, message_id=99, caption='')
+        self.bridge.store.add_file('job', (101, 3), saved, 'stored-heic', 'document',
+                                   source_media_key='document:12345')
+        incoming = NS(chat_id=101, id=50, raw_text='', photo=None,
+                      document=NS(id=12345), file=NS(ext='.heic'), buttons=[])
+
+        async def send(*args):
+            await self.job['events'].put(incoming)
+
+        self.bridge.client = NS(get_entity=AsyncMock(return_value=NS(id=101, bot=True)),
+                                get_messages=AsyncMock(return_value=[NS(id=49)]),
+                                send_message=AsyncMock(side_effect=send), disconnect=AsyncMock())
+        self.bridge.transfer_media = AsyncMock()
+        await self.bridge.collect('https://t.me/epan?start=s_abc', self.job)
+        self.bridge.transfer_media.assert_awaited_once_with(incoming, (101, 3), self.job, preview_only=True)
+
+    async def test_original_callback_checks_task_ownership(self):
+        self.bridge.owners.add(8)
+        query = NS(data='bridge_original:job:101:3', answer=AsyncMock())
+        update = NS(callback_query=query, effective_user=NS(id=8), effective_chat=NS(type='private', id=8))
+        bot = NS(send_document=AsyncMock())
+        with self.assertRaises(ApplicationHandlerStop):
+            await self.bridge.original(update, NS(bot=bot))
+        bot.send_document.assert_not_awaited()
+        query.answer.assert_awaited_once_with('文件不存在或无权查看', show_alert=True)

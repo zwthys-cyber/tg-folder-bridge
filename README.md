@@ -4,6 +4,8 @@
 
 默认 `TRANSFER_MODE=forward`，只在 Telegram 内转发，不下载媒体。可选择 `TRANSFER_MODE=download_upload`：逐个文件下载到服务器、重新上传、确认自己的机器人收件后立即删除临时文件。服务器长期保留登录会话和 SQLite 文件索引，机器人通过自己的 `file_id` 取回文件。80 GB 服务器的升级步骤见 [TRANSFER.md](TRANSFER.md)。
 
+下载上传模式支持 HEIC/HEIF 的小型 JPEG 显示预览，原件仍保留，可在预览下点击“下载 HEIC 原图”。大文件支持同一文件的分块并发上传；`/status 任务编号` 查看进度和速度，`/resume 任务编号` 继续旧任务或为已存 HEIC 补预览。实际提速取决于服务器网络和 Telegram 限速。
+
 ## 当前状态
 
 支持 URL 按钮和回调按钮。实际部署已反馈能够读到卡片中的 63 个文件数量，但源聊天禁止转发，forward 模式会返回 ChatForwardsRestrictedError。新下载上传模式仍需真实账号测试；它只能下载账号实际可读取的资源，不保证该分享允许下载，也不保证所有源菜单已兼容。GitHub Actions 检查解析、索引、模拟收件及磁盘清理，不连接真实 Telegram 账号。

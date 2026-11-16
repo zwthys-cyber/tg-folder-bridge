@@ -24,6 +24,15 @@ def media_count(text):
     return sum(int(x.replace(',', '')) for x in counts) if counts else None
 
 
+def media_key(message):
+    for kind in ('document', 'photo'):
+        media = getattr(message, kind, None)
+        identifier = getattr(media, 'id', None)
+        if identifier is not None:
+            return f'{kind}:{identifier}'
+    return ''
+
+
 class Store:
     def __init__(self, path):
         self.db = sqlite3.connect(path)
@@ -42,6 +51,10 @@ class Store:
         columns = {x['name'] for x in self.db.execute('PRAGMA table_info(files)')}
         if 'caption' not in columns:
             self.db.execute("ALTER TABLE files ADD COLUMN caption TEXT DEFAULT ''")
+        if 'preview_file_id' not in columns:
+            self.db.execute("ALTER TABLE files ADD COLUMN preview_file_id TEXT DEFAULT ''")
+        if 'media_key' not in columns:
+            self.db.execute("ALTER TABLE files ADD COLUMN media_key TEXT DEFAULT ''")
         self.db.execute("UPDATE jobs SET state='interrupted' WHERE state IN ('queued','running')")
         self.db.commit()
 
@@ -67,10 +80,22 @@ class Store:
         return [dict(x) for x in self.db.execute(
             'SELECT * FROM jobs WHERE owner=? ORDER BY rowid DESC LIMIT ?', (owner, limit))]
 
-    def add_file(self, job, source, message, file_id, kind, caption=None):
+    def set_preview(self, job, source, file_id):
+        self.db.execute('UPDATE files SET preview_file_id=? '
+                        'WHERE job=? AND source_chat=? AND source_message=?',
+                        (file_id, job, *source))
+        self.db.commit()
+
+    def set_media_key(self, job, source, key):
+        self.db.execute('UPDATE files SET media_key=? WHERE job=? AND source_chat=? AND source_message=?',
+                        (key, job, *source))
+        self.db.commit()
+
+    def add_file(self, job, source, message, file_id, kind, caption=None, source_media_key=''):
         self.db.execute('''INSERT OR IGNORE INTO files
-            (job,source_chat,source_message,chat,message,file_id,kind,caption)
-            VALUES(?,?,?,?,?,?,?,?)''',
+            (job,source_chat,source_message,chat,message,file_id,kind,caption,media_key)
+            VALUES(?,?,?,?,?,?,?,?,?)''',
             (job, *source, message.chat_id, message.message_id, file_id, kind,
-             (getattr(message, 'caption', None) or '') if caption is None else caption))
+             (getattr(message, 'caption', None) or '') if caption is None else caption,
+             source_media_key))
         self.db.commit()
