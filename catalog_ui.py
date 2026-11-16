@@ -11,7 +11,8 @@ def catalog_page(rows, page=1, page_callback_prefix='bridge_catalog'):
     buttons = []
     for i, row in enumerate(selected, start + 1):
         title = row['title'] or ('文件夹 ' + row['id'][:8])
-        pending = '，导入未完成' if row.get('state', 'complete') != 'complete' else ''
+        pending = ('，内容核验中' if row.get('audit_public') else
+                   '，导入未完成' if row.get('state', 'complete') != 'complete' else '')
         body.append(f"{i}. 📁 {title}（{row['file_count']} 个文件{pending}）")
     for offset in range(0, len(selected), 5):
         buttons.append([InlineKeyboardButton(str(start + offset + i + 1),

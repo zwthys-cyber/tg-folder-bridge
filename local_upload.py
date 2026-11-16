@@ -34,7 +34,7 @@ def safe_filename(name):
 
 
 async def send_local(bot, store, job, source, chat, path, marker, filename,
-                     photo=False, thumbnail=None, stats=None, save=None, caption=None):
+                     photo=False, thumbnail=None, stats=None, save=None, caption=None, video=None):
     path = Path(path)
     size = path.stat().st_size
     if not eligible(size):
@@ -78,9 +78,13 @@ async def send_local(bot, store, job, source, chat, path, marker, filename,
                         raise ValueError('Thumbnail too large')
                     kwargs['thumbnail'] = InputFile(data, filename='thumbnail.jpg')
                 submitted = True
-                reply = await bot.send_document(document=named.as_uri(),
-                    disable_content_type_detection=True, **kwargs)
-                kind, media = 'document', reply.document
+                if video:
+                    reply = await bot.send_video(video=named.as_uri(), **video, **kwargs)
+                    kind, media = 'video', reply.video
+                else:
+                    reply = await bot.send_document(document=named.as_uri(),
+                        disable_content_type_detection=True, **kwargs)
+                    kind, media = 'document', reply.document
             if (reply.chat_id != chat or not media or not media.file_id
                     or (not photo and media.file_size != size)):
                 raise DeliveryUnknownError('Local Bot API receipt could not be validated')

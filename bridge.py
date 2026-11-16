@@ -23,8 +23,9 @@ from adaptive_speed import AdaptiveSpeed
 from upload_transport import UploadTransport
 from bot_api_config import endpoint, LOCAL
 from local_upload import eligible, send_local, DeliveryUnknownError
+from content_identity import analyze, preference
 
-VERSION = '0.4.0'
+VERSION = '0.5.0'
 
 
 class Bridge:
@@ -107,6 +108,7 @@ class Bridge:
         app.add_handler(CommandHandler('transport', self.transport_command), group=-100)
         app.add_handler(CommandHandler('diagnostics', self.diagnostics), group=-100)
         app.add_handler(CommandHandler('resolve', self.resolve_delivery), group=-100)
+        app.add_handler(CommandHandler('dedup', self.dedup), group=-100)
         app.add_handler(CallbackQueryHandler(self.original, pattern=r'^bridge_original:'), group=-100)
         app.add_handler(CallbackQueryHandler(self.catalog_callback, pattern=r'^bridge_(catalog|open|search):'), group=-100)
         app.add_handler(MessageHandler(filters.Regex(r'^https://t\.me/\w+\?start='),
@@ -205,12 +207,14 @@ class Bridge:
                     BotCommand('transport', '设置上传连接数'),
                     BotCommand('diagnostics', '查看实测传输记录'),
                     BotCommand('resolve', '确认未知上传后允许重试'),
+                    BotCommand('dedup', '核验内容并合并重复索引'),
                     BotCommand('delete', '删除搜索资源')], scope=BotCommandScopeChat(owner))
             except BadRequest:
                 pass  # This owner may not have opened the bot yet.
 
     def can_view(self, job, uid):
-        return bool(job and ((uid in self.owners and job['owner'] == uid) or job['state'] == 'complete'))
+        return bool(job and ((uid in self.owners and job['owner'] == uid)
+                            or job['state'] == 'complete' or job.get('audit_public')))
 
     async def start_command(self, update, context):
         if update.effective_chat.type == 'private':
@@ -364,9 +368,13 @@ class Bridge:
             await update.message.reply_text('用法：/status 任务编号')
             raise ApplicationHandlerStop
         n = len(self.store.files(job['id']))
+        processed = self.store.processed_count(job['id'])
+        counts = (f"已处理 {processed} / {job['expected'] if job['expected'] is not None else '未知'} 个来源条目\n"
+                  f"唯一资源 {n}，合并重复 {processed-n} 个\n") if processed != n else (
+                  f"已保存 {n} / {job['expected'] if job['expected'] is not None else '未知'} 个原文件\n")
         await update.message.reply_text(
             f"任务：{job['id']}\n状态：{job['state']}\n"
-            f"已保存 {n} / {job['expected'] if job['expected'] is not None else '未知'} 个原文件\n"
+            f"{counts}"
             f"{job['detail']}")
         raise ApplicationHandlerStop
 
@@ -491,6 +499,21 @@ class Bridge:
             self.store.authorize_local_retry(job['id'])
             self.blocked = False
             await update.message.reply_text('已记录你确认未收到。发送 /resume '+job['id']+' 继续。')
+        raise ApplicationHandlerStop
+
+    async def dedup(self, update, context):
+        if update.effective_chat.type != 'private' or update.effective_user.id not in self.owners:
+            raise ApplicationHandlerStop
+        row = self.store.get(context.args[0]) if context.args else None
+        if not row or row['owner'] != update.effective_user.id:
+            await update.message.reply_text('用法：/dedup 任务编号。只合并已核验的重复索引，旧聊天媒体不删除。')
+        elif row['state'] in {'queued', 'running', 'cooldown'} or self.jobs.full() or self.blocked:
+            await update.message.reply_text('请等待当前任务结束或未知发送确认后再核验。')
+        else:
+            self.store.request_audit(row['id'])
+            self.store.update(row['id'], 'queued', row['expected'], '内容核验已排队；旧媒体不删除。')
+            self.jobs.put_nowait(row['id'])
+            await update.message.reply_text('内容核验已排队。确认相同内容后优先保留原始信息更完整的一份；未确认的版本保留。')
         raise ApplicationHandlerStop
 
     async def original(self, update, context):
@@ -649,7 +672,8 @@ class Bridge:
                 job_id, expected = job['id'], job['expected']
                 job.clear()
                 job.update(id=job_id, expected=expected, chats=set(), baselines={},
-                           events=asyncio.Queue(maxsize=5000), overflow=False)
+                           events=asyncio.Queue(maxsize=5000), overflow=False,
+                           dedup_audit=bool(self.store.get(job_id).get('audit_requested')))
 
     async def work(self):
         while True:
@@ -660,12 +684,13 @@ class Bridge:
                 continue
             row = self.store.get(job_id)
             job = dict(id=job_id, expected=row['expected'], chats=set(), baselines={},
-                       events=asyncio.Queue(maxsize=5000), overflow=False)
+                       events=asyncio.Queue(maxsize=5000), overflow=False,
+                       dedup_audit=bool(row.get('audit_requested')))
             self.active = job
             self.store.update(job_id, 'running', job['expected'])
             try:
                 await asyncio.wait_for(self.collect_with_recovery(row['link'], job), self.timeout)
-                n = len(self.store.files(job_id))
+                n = self.store.processed_count(job_id)
                 complete = job['expected'] is not None and n == job['expected']
                 detail = '' if complete else '发送已静默，无法确认全部文件已收到。'
                 if job.get('preview_warnings'):
@@ -675,6 +700,8 @@ class Bridge:
                 if job.get('callback_timeout') and not complete:
                     detail += ' 源机器人未确认某次翻组点击，可稍后续传重试。'
                 self.store.update(job_id, 'complete' if complete else 'needs_review', job['expected'], detail)
+                if complete:
+                    self.store.finish_audit(job_id)
             except asyncio.CancelledError:
                 self.store.update(job_id, 'interrupted', job['expected'])
                 raise
@@ -763,16 +790,38 @@ class Bridge:
                            f"；{metrics.get('connections', 1)} 条连接（{metrics.get('transport', 'sdk')}）")
             if metrics.get('retries'):
                 detail += f"\n短暂断线已重连 {metrics['retries']} 次，保留已确认分块。"
+            if job.get('audit_total'):
+                detail += f"\n内容核验 {job.get('audit_index', 0)} / {job['audit_total']}；确认重复后只合并索引。"
             self.store.update(job['id'], 'running', job['expected'], detail)
         return callback
 
-    async def transfer_media(self, message, key, job, preview_only=False, replace_original=False):
+    async def transfer_media(self, message, key, job, preview_only=False, replace_original=False, existing=None):
         if self.transfer_mode == 'download_upload':
             job['phase'] = '下载'
             self.store.update(job['id'], 'running', job['expected'], '正在下载一个文件到临时目录。')
             job['download_stats'] = {}
             self.tuners['下载'].begin()
             async with self.staged_download(message, job) as path:
+                analysis = None
+                duplicate = None
+                if not preview_only:
+                    import json
+                    job['phase'] = '内容核验'
+                    self.store.update(job['id'], 'running', job['expected'],
+                        f"核验原始内容和视频参数，不转码、不剥离拍摄信息。\n内容核验 {job.get('audit_index', 0)} / {job.get('audit_total', 0)}")
+                    analysis = await analyze(path, native=bool(getattr(getattr(message, 'media', None), 'video', False)))
+                    if existing:
+                        self.store.set_analysis(job['id'], key, analysis)
+                    duplicate = self.store.duplicate(job['id'], key, analysis)
+                    if duplicate and preference(analysis['quality']) <= preference(json.loads(duplicate['quality_json'])):
+                        self.store.merge_alias(job['id'], key,
+                            (duplicate['source_chat'], duplicate['source_message']), media_key(message))
+                        return
+                    if existing:
+                        if duplicate:
+                            self.store.merge_alias(job['id'], (duplicate['source_chat'], duplicate['source_message']),
+                                                   key, duplicate.get('media_key', ''))
+                        return
                 preview = None
                 thumbnail = None
                 if self.heic_previews:
@@ -806,6 +855,10 @@ class Bridge:
                 if not preview_only:
                     await self.deliver(message, key, marker=marker, upload_path=path, attrs=attrs,
                                        thumbnail=thumbnail, replace_original=replace_original)
+                    self.store.set_analysis(job['id'], key, analysis)
+                    if duplicate:
+                        self.store.merge_alias(job['id'], (duplicate['source_chat'], duplicate['source_message']),
+                                               key, duplicate.get('media_key', ''))
                 if preview and not self.document_groups:
                     await self.deliver(message, key, marker=f'preview:{uuid.uuid4().hex}',
                                        upload_path=preview, preview=True)
@@ -845,7 +898,8 @@ class Bridge:
                 self.active['phase'] = '发送媒体消息'
                 await self.client.send_file(
                     self.destination, uploaded, caption=marker, parse_mode=None,
-                    force_document=not preview and (self.document_groups or not bool(message.photo)), attributes=attrs or None,
+                    force_document=not preview and not bool(getattr(getattr(message, 'media', None), 'video', False))
+                        and (self.document_groups or not bool(message.photo)), attributes=attrs or None,
                     thumb=str(thumbnail) if thumbnail else None,
                     supports_streaming=any(isinstance(a, types.DocumentAttributeVideo)
                                            for a in attrs or []))
@@ -864,6 +918,12 @@ class Bridge:
             '本地 Bot API 正在上传（2000 MB 以内）。此通道没有可靠的远端字节进度，确认发送后计入文件夹。')
         filename = next((a.file_name for a in attrs or [] if isinstance(a, types.DocumentAttributeFilename)), Path(path).name)
         photo = preview or (not self.document_groups and bool(message.photo))
+        video = None
+        if not photo and bool(getattr(getattr(message, 'media', None), 'video', False)):
+            attribute = next((a for a in attrs or [] if isinstance(a, types.DocumentAttributeVideo)), None)
+            if attribute:
+                video = dict(width=attribute.w, height=attribute.h, duration=int(attribute.duration),
+                             supports_streaming=bool(attribute.supports_streaming))
         stats, failure = {}, ''
         def save(reply, kind, media):
             if preview:
@@ -875,7 +935,7 @@ class Bridge:
         try:
             return await send_local(self.app.bot, self.store, job['id'], key,
                 self.store.get(job['id'])['owner'], path, marker, filename,
-                photo=photo, thumbnail=thumbnail, stats=stats, save=save, caption=message.raw_text or '')
+                photo=photo, thumbnail=thumbnail, stats=stats, save=save, caption=message.raw_text or '', video=video)
         except DeliveryUnknownError:
             self.blocked = True
             failure = 'DeliveryUnknownError'
@@ -891,7 +951,7 @@ class Bridge:
         clicked = set()
         seen = set()
         actions = 0
-        remaining = {(x['source_chat'], x['source_message']): x for x in self.store.files(job['id'])}
+        remaining = {(x['source_chat'], x['source_message']): x for x in self.store.resume_entries(job['id'])}
         # Older versions did not store a stable media ID. Recover it from the
         # old source messages; never identify duplicates by filename alone.
         for source, row in remaining.items():
@@ -973,6 +1033,7 @@ class Bridge:
         job['handle_next_groups'] = handle_buttons
 
         await follow(link)
+        plan = []
         while True:
             if job.get('button_error'):
                 raise job['button_error']
@@ -983,7 +1044,7 @@ class Bridge:
             except asyncio.TimeoutError:
                 if job.get('pending_group_clicks'):
                     continue
-                return
+                break
             if not job.get('expected_refreshed'):
                 expected = media_count(message.raw_text or '')
                 if expected is not None:
@@ -997,18 +1058,35 @@ class Bridge:
             key = (message.chat_id, message.id)
             if (message.photo or message.document) and key not in seen:
                 seen.add(key)
-                previous_key = key if key in remaining else next(
-                    (source for source, row in remaining.items()
-                     if media_key(message) and row.get('media_key') == media_key(message)), None)
-                previous = remaining.pop(previous_key) if previous_key is not None else None
-                if previous:
-                    ext = getattr(getattr(message, 'file', None), 'ext', '') or ''
-                    if self.transfer_mode == 'download_upload' and self.heic_previews and ext.lower() in {'.heic', '.heif'}:
-                        if self.document_groups and not previous.get('has_thumbnail'):
-                            await self.transfer_media(message, previous_key, job, replace_original=True)
-                        elif not self.document_groups and not previous.get('preview_file_id'):
-                            await self.transfer_media(message, previous_key, job, preview_only=True)
-                else:
-                    await self.transfer_media(message, key, job)
-                await asyncio.sleep(self.transfer_pause)
+                if len(plan) >= 5000:
+                    raise RuntimeError('文件计划超过安全上限')
+                plan.append(message)
             await handle_buttons(message)
+            if job['expected'] is not None and len(plan) >= job['expected'] and not job.get('pending_group_clicks'):
+                break
+        # Inspect all batches first so original/native entries arrive before
+        # attachment duplicates. This stores metadata only, not media bytes.
+        plan.sort(key=lambda m: bool(getattr(getattr(m, 'media', None), 'video', False)), reverse=True)
+        job['audit_total'] = len(plan)
+        for index, message in enumerate(plan, 1):
+            job['audit_index'] = index
+            key = (message.chat_id, message.id)
+            previous_key = key if key in remaining else next(
+                (source for source, row in remaining.items()
+                 if media_key(message) and row.get('media_key') == media_key(message)), None)
+            previous = remaining.pop(previous_key) if previous_key is not None else None
+            if previous:
+                if previous.get('is_alias'):
+                    continue
+                if job.get('dedup_audit') and not previous.get('content_sha256'):
+                    await self.transfer_media(message, previous_key, job, existing=previous)
+                    continue
+                ext = getattr(getattr(message, 'file', None), 'ext', '') or ''
+                if self.transfer_mode == 'download_upload' and self.heic_previews and ext.lower() in {'.heic', '.heif'}:
+                    if self.document_groups and not previous.get('has_thumbnail'):
+                        await self.transfer_media(message, previous_key, job, replace_original=True)
+                    elif not self.document_groups and not previous.get('preview_file_id'):
+                        await self.transfer_media(message, previous_key, job, preview_only=True)
+            else:
+                await self.transfer_media(message, key, job)
+            await asyncio.sleep(self.transfer_pause)

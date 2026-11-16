@@ -69,6 +69,11 @@ class Store:
                 id INTEGER PRIMARY KEY, job TEXT, source_chat INTEGER,
                 source_message INTEGER, marker TEXT, state TEXT
             );
+            CREATE TABLE IF NOT EXISTS file_aliases (
+                job TEXT, source_chat INTEGER, source_message INTEGER, media_key TEXT,
+                canonical_chat INTEGER, canonical_message INTEGER,
+                PRIMARY KEY(job,source_chat,source_message)
+            );
         ''')
         columns = {x['name'] for x in self.db.execute('PRAGMA table_info(files)')}
         if 'caption' not in columns:
@@ -79,11 +84,17 @@ class Store:
             self.db.execute("ALTER TABLE files ADD COLUMN media_key TEXT DEFAULT ''")
         if 'has_thumbnail' not in columns:
             self.db.execute('ALTER TABLE files ADD COLUMN has_thumbnail INTEGER DEFAULT 0')
+        for column, default in (('content_sha256', "''"), ('stream_sha256', "''"), ('quality_json', "'{}'")):
+            if column not in columns:
+                self.db.execute(f'ALTER TABLE files ADD COLUMN {column} TEXT DEFAULT {default}')
         job_columns = {x['name'] for x in self.db.execute('PRAGMA table_info(jobs)')}
         if 'title' not in job_columns:
             self.db.execute("ALTER TABLE jobs ADD COLUMN title TEXT DEFAULT ''")
         if 'restart_pending' not in job_columns:
             self.db.execute('ALTER TABLE jobs ADD COLUMN restart_pending INTEGER DEFAULT 0')
+        for column in ('audit_requested', 'audit_public'):
+            if column not in job_columns:
+                self.db.execute(f'ALTER TABLE jobs ADD COLUMN {column} INTEGER DEFAULT 0')
         self.db.execute("UPDATE jobs SET restart_pending=1 WHERE state IN ('running','queued','cooldown')")
         self.recoverable_jobs = [row['id'] for row in self.db.execute(
             "SELECT id FROM jobs WHERE restart_pending=1 AND state IN "
@@ -157,6 +168,54 @@ class Store:
         return [dict(x) for x in self.db.execute(
             'SELECT * FROM files WHERE job=? ORDER BY rowid', (job,))]
 
+    def processed_count(self, job):
+        return len(self.files(job)) + self.db.execute('SELECT count(*) FROM file_aliases WHERE job=?', (job,)).fetchone()[0]
+
+    def resume_entries(self, job):
+        rows = self.files(job)
+        canonical = {(r['source_chat'], r['source_message']): r for r in rows}
+        aliases = []
+        for alias in self.db.execute('SELECT * FROM file_aliases WHERE job=?', (job,)):
+            row = canonical.get((alias['canonical_chat'], alias['canonical_message']))
+            if row:
+                aliases.append(dict(row, source_chat=alias['source_chat'], source_message=alias['source_message'],
+                                    media_key=alias['media_key'], is_alias=True))
+        return rows+aliases
+
+    def set_analysis(self, job, source, analysis):
+        import json
+        self.db.execute('UPDATE files SET content_sha256=?,stream_sha256=?,quality_json=? '
+                        'WHERE job=? AND source_chat=? AND source_message=?',
+            (analysis['content_sha256'], analysis['stream_sha256'], json.dumps(analysis['quality']), job, *source))
+        self.db.commit()
+
+    def duplicate(self, job, source, analysis):
+        row = self.db.execute('SELECT * FROM files WHERE job=? AND NOT (source_chat=? AND source_message=?) '
+            "AND ((content_sha256<>'' AND content_sha256=?) OR (stream_sha256<>'' AND stream_sha256=?)) LIMIT 1",
+            (job, *source, analysis['content_sha256'], analysis['stream_sha256'])).fetchone()
+        return dict(row) if row else None
+
+    def merge_alias(self, job, source, canonical, source_media_key):
+        if source == canonical:
+            return
+        if not self.db.execute('SELECT 1 FROM files WHERE job=? AND source_chat=? AND source_message=?',
+                               (job, *canonical)).fetchone():
+            raise ValueError('Canonical file must already be confirmed')
+        with self.db:
+            self.db.execute('UPDATE file_aliases SET canonical_chat=?,canonical_message=? '
+                            'WHERE job=? AND canonical_chat=? AND canonical_message=?', (*canonical, job, *source))
+            self.db.execute('INSERT OR REPLACE INTO file_aliases VALUES(?,?,?,?,?,?)',
+                            (job, *source, source_media_key, *canonical))
+            self.db.execute('DELETE FROM files WHERE job=? AND source_chat=? AND source_message=?', (job, *source))
+
+    def request_audit(self, job):
+        self.db.execute("UPDATE jobs SET audit_requested=1,audit_public=(state='complete') WHERE id=?", (job,))
+        self.db.commit()
+
+    def finish_audit(self, job):
+        self.db.execute('UPDATE jobs SET audit_requested=0,audit_public=0 WHERE id=?', (job,))
+        self.db.commit()
+
     def list_jobs(self, owner, limit=20):
         return [dict(x) for x in self.db.execute(
             'SELECT * FROM jobs WHERE owner=? ORDER BY rowid DESC LIMIT ?', (owner, limit))]
@@ -179,7 +238,7 @@ class Store:
     def catalog(self):
         return [dict(x) for x in self.db.execute('''
             SELECT jobs.*, count(files.file_id) AS file_count FROM jobs
-            JOIN files ON files.job=jobs.id WHERE jobs.state='complete'
+            JOIN files ON files.job=jobs.id WHERE (jobs.state='complete' OR jobs.audit_public=1)
             GROUP BY jobs.id ORDER BY jobs.rowid DESC
         ''')]
 
@@ -188,7 +247,7 @@ class Store:
             SELECT jobs.*, count(files.file_id) AS file_count FROM jobs
             JOIN files ON files.job=jobs.id
             WHERE instr(lower(jobs.title), lower(?)) > 0
-              AND (jobs.state='complete' OR (? AND jobs.owner=?))
+              AND (jobs.state='complete' OR jobs.audit_public=1 OR (? AND jobs.owner=?))
             GROUP BY jobs.id ORDER BY jobs.rowid DESC
         ''', (query, int(owned), uid))]
 
