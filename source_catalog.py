@@ -83,17 +83,24 @@ class Catalog:
                 raise MenuChangedError('没有找到详情的返回目录按钮。')
             message = await self.click(message, backs[0].data, lambda m: list_page(m) is not None)
             page = list_page(message)
-        if page and page[0] == wanted:
-            return message
-        # Return-from-detail and list pagination are different source protocols.
-        # Derive page navigation only from a real, currently displayed page button.
-        navigation = [b.data for b in buttons(message)
-                      if b.data and re.fullmatch(rb'folders_list_page/\d+', b.data)]
-        if not navigation or not 1 <= wanted <= page[1]:
-            raise MenuChangedError('目录翻页按钮发生变化或页码已失效。')
-        data = navigation[0].rsplit(b'/', 1)[0] + b'/' + str(wanted).encode()
-        return await self.click(message, data,
-                                lambda m: bool(list_page(m) and list_page(m)[0] == wanted))
+        if not 1<=wanted<=page[1]:
+            raise MenuChangedError('目录页码已失效。')
+        visited=set()
+        while page[0]!=wanted:
+            if page[0] in visited:raise MenuChangedError('来源翻页没有前进。')
+            visited.add(page[0])
+            direction=1 if wanted>page[0] else -1
+            target=page[0]+direction
+            # Telegram rejects data absent from the current keyboard. Walk real
+            # previous/next buttons; never invent a direct jump callback.
+            navigation=[b.data for b in buttons(message)
+                        if b.data==f'folders_list_page/{target}'.encode()]
+            if len(navigation)!=1:raise MenuChangedError('来源没有预期的上一页或下一页按钮。')
+            message=await self.click(message,navigation[0],
+                lambda m:bool(list_page(m) and list_page(m)[0]==target))
+            if target==wanted:return message
+            page=list_page(message)
+        return message
 
     async def scan_page(self, ledger, head=False):
         wanted, _, finished = ledger.page(self.source)

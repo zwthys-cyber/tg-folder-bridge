@@ -176,6 +176,9 @@ class Store:
         for column, default in (('content_sha256', "''"), ('stream_sha256', "''"), ('quality_json', "'{}'")):
             if column not in columns:
                 self.db.execute(f'ALTER TABLE files ADD COLUMN {column} TEXT DEFAULT {default}')
+        for column,definition in (('captured_at',"TEXT DEFAULT ''"),('capture_time_source',"TEXT DEFAULT ''"),
+                                  ('capture_checked','INTEGER DEFAULT 0')):
+            if column not in columns:self.db.execute(f'ALTER TABLE files ADD COLUMN {column} {definition}')
         job_columns = {x['name'] for x in self.db.execute('PRAGMA table_info(jobs)')}
         if 'title' not in job_columns:
             self.db.execute("ALTER TABLE jobs ADD COLUMN title TEXT DEFAULT ''")
@@ -370,6 +373,16 @@ class Store:
                         'WHERE job=? AND source_chat=? AND source_message=?',
             (analysis['content_sha256'], analysis['stream_sha256'], json.dumps(analysis['quality']), job, *source))
         self.db.commit()
+        if analysis['quality'].get('capture_checked'):
+            self.set_capture_time(job,source,analysis['quality'])
+
+    def set_capture_time(self,job,source,result):
+        with self.db:
+            self.db.execute("UPDATE files SET captured_at=CASE WHEN ?<>'' THEN ? ELSE captured_at END, "
+                "capture_time_source=CASE WHEN ?<>'' THEN ? ELSE capture_time_source END,capture_checked=1 "
+                'WHERE job=? AND source_chat=? AND source_message=?',
+                (result.get('captured_at',''),result.get('captured_at',''),result.get('captured_at',''),
+                 result.get('capture_time_source',''),job,*source))
 
     def duplicate(self, job, source, analysis):
         row = self.db.execute('SELECT * FROM files WHERE job=? AND NOT (source_chat=? AND source_message=?) '

@@ -64,6 +64,8 @@ class Operations:
         deliveries=dict(self.store.db.execute('SELECT state,count(*) FROM deliveries GROUP BY state'))
         lines.append(f"用户内容发送：排队 {deliveries.get('queued',0)}，运行 {deliveries.get('running',0)}，"
                      f"停止 {deliveries.get('paused',0)}，待确认 {deliveries.get('uncertain',0)}")
+        dates=self.store.db.execute("SELECT count(*),sum(captured_at<>''),sum(capture_checked=0) FROM files").fetchone()
+        lines.append(f'拍摄时间：已识别 {dates[1] or 0} / {dates[0]}，待补读 {dates[2] or 0}')
         collector = root / 'collector.sqlite3'
         heartbeat = root / 'collector-heartbeat.json'
         if heartbeat.exists():

@@ -29,12 +29,13 @@ from source_lock import source_lease
 from operations import Operations
 from browse_navigation import BrowseNavigation
 from delivery import WholeDelivery
+from capture_backfill import CaptureBackfill
 import automation_control
 
-VERSION = '0.8.0'
+VERSION = '0.9.0'
 
 
-class Bridge(Operations, BrowseNavigation, WholeDelivery):
+class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill):
     def __init__(self):
         self.owners = {int(x) for x in os.environ['OWNER_IDS'].split(',') if x.strip()}
         self.relay_id = int(os.environ['RELAY_USER_ID'])
@@ -101,6 +102,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery):
         self.pending_jumps = {}
         self.retry_worker = None
         self.delivery_worker = None
+        self.capture_worker = None
 
     def install(self, app):
         # Negative group runs before ordinary existing bot handlers. Reserve -100.
@@ -158,6 +160,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery):
         self.recovery_worker = asyncio.create_task(self.restore_jobs())
         self.retry_worker = asyncio.create_task(self.retry_loop())
         self.delivery_worker = asyncio.create_task(self.delivery_loop())
+        self.capture_worker = asyncio.create_task(self.capture_loop())
 
     async def restore_jobs(self):
         if not self.auto_resume or self.transfer_mode != 'download_upload':
@@ -395,6 +398,10 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery):
             self.store.set_cover(job['id'], reply.photo[-1].file_id)
 
     async def stop(self, app):
+        if self.capture_worker:
+            self.capture_worker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self.capture_worker
         if self.delivery_worker:
             self.delivery_worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):

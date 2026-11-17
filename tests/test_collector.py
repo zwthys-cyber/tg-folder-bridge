@@ -173,3 +173,14 @@ class MenuTests(unittest.IsolatedAsyncioTestCase):
         await catalog.page(1)
         self.assertEqual([c.args[1] for c in catalog.click.await_args_list],
                          [b'back_to_folders_list_user/2', b'folders_list_page/1'])
+
+    async def test_page_three_from_head_walks_actual_buttons(self):
+        def listing(page):
+            return NS(raw_text=f'共1052个文件夹（第{page}/106页）',buttons=[[
+                NS(text='1',data=b'folder_preview_list/1'),NS(text='下一页',data=f'folders_list_page/{page+1}'.encode())]])
+        catalog=Catalog(NS(),'source',{'epan'})
+        catalog.find_panel=AsyncMock(return_value=listing(1))
+        catalog.click=AsyncMock(side_effect=[listing(2),listing(3)])
+        await catalog.page(3)
+        self.assertEqual([c.args[1] for c in catalog.click.await_args_list],
+                         [b'folders_list_page/2',b'folders_list_page/3'])
