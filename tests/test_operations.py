@@ -23,6 +23,8 @@ class OperationsTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        self.environment = patch.dict('os.environ', {'BACKUP_DIR': str(self.root/'backups')})
+        self.environment.start()
         self.app = Runtime()
         self.app.settings_file = self.root / 'performance.json'
         self.app.store = Store(self.root / 'index.sqlite3')
@@ -42,6 +44,7 @@ class OperationsTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         self.app.store.db.close()
+        self.environment.stop()
         self.tmp.cleanup()
 
     async def test_non_owner_cannot_use_admin_controls(self):

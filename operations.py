@@ -54,8 +54,12 @@ class Operations:
                 lines.append(f'目录采集：已完成 {total if finished else max(0,page-1)}/{total} 页')
             lines.append(f"链接：已完成 {counts.get('complete',0)}，待提交 {counts.get('ready',0)}，需检查 {counts.get('review',0)+counts.get('dispatching',0)}")
         latest = Path(os.getenv('BACKUP_DIR', '/root/sougabot-backups/scheduled'))
-        backups = sorted(latest.glob('metadata-*/manifest.json')) if latest.exists() else []
-        lines.append('最近备份：' + (backups[-1].parent.name.removeprefix('metadata-') if backups else '尚无备份'))
+        try:
+            backups = sorted(latest.glob('metadata-*/manifest.json')) if latest.exists() else []
+            backup_status = backups[-1].parent.name.removeprefix('metadata-') if backups else '尚无备份'
+        except OSError:
+            backup_status = '目录暂不可读，请检查 BACKUP_DIR 权限'
+        lines.append('最近备份：' + backup_status)
         keyboard = Keyboard([
             [Button('🔄 刷新',callback_data='bridge_admin:panel')],
             [Button('继续采集' if control.paused(root,'collector') else '暂停采集',callback_data='bridge_admin:collector'),
