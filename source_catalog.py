@@ -98,6 +98,7 @@ class Catalog:
             detail = await self.click(message, number.data, lambda m: share_link(m, self.allowed) is not None)
             title, link = share_link(detail, self.allowed)
             ledger.add(self.source, key, title, link)
+            print(f'已采集：{title}；目录第 {page}/{total} 页', flush=True)
             backs = [b for b in buttons(detail) if '文件夹列表' in b.text and b.data]
             if len(backs) != 1:
                 raise MenuChangedError('详情的返回目录按钮发生变化。')

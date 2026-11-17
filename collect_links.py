@@ -18,7 +18,7 @@ from source_lock import source_lease
 
 async def connect(config, root):
     # Copy only authentication into memory. Two processes must not write relay.session.
-    with sqlite3.connect((root / 'relay.session').resolve().as_uri() + '?mode=ro', uri=True) as db:
+    with contextlib.closing(sqlite3.connect((root / 'relay.session').resolve().as_uri() + '?mode=ro', uri=True)) as db:
         row = db.execute('SELECT dc_id,server_address,port,auth_key FROM sessions').fetchone()
     if not row or not row[3]:
         raise RuntimeError('先使用 login.py 登录专用中转账号。')
@@ -39,7 +39,7 @@ async def connect(config, root):
 def safe_to_dispatch(index, rows, root):
     if any(r['state'] in ACTIVE for r in rows):
         return False
-    with sqlite3.connect(index.resolve().as_uri() + '?mode=ro', uri=True) as db:
+    with contextlib.closing(sqlite3.connect(index.resolve().as_uri() + '?mode=ro', uri=True)) as db:
         if db.execute("SELECT 1 FROM local_send_intents WHERE state IN ('pending','unknown') LIMIT 1").fetchone():
             return False
     cooldown = root / 'rate-limit.json'

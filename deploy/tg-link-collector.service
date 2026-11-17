@@ -3,6 +3,7 @@ Description=Telegram folder link collector
 After=network-online.target sougabot.service
 Wants=network-online.target
 Requires=sougabot.service
+PartOf=sougabot.service
 
 [Service]
 Type=simple

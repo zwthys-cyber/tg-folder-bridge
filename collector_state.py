@@ -2,6 +2,7 @@
 import sqlite3
 import re
 import time
+import contextlib
 from pathlib import Path
 from urllib.parse import urlencode
 from core import parse_link
@@ -16,7 +17,7 @@ def canonical(url, allowed):
 
 def existing_jobs(path, owner, allowed):
     # Never instantiate core.Store here: its startup recovery mutates jobs.
-    with sqlite3.connect(Path(path).resolve().as_uri() + '?mode=ro', uri=True) as db:
+    with contextlib.closing(sqlite3.connect(Path(path).resolve().as_uri() + '?mode=ro', uri=True)) as db:
         db.row_factory = sqlite3.Row
         rows = [dict(r) for r in db.execute('SELECT * FROM jobs WHERE owner=? ORDER BY rowid', (owner,))]
     result = {}
