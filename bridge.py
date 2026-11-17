@@ -25,8 +25,9 @@ from upload_transport import UploadTransport
 from bot_api_config import endpoint, LOCAL
 from local_upload import eligible, send_local, DeliveryUnknownError
 from content_identity import analyze, preference
+from source_lock import source_lease
 
-VERSION = '0.5.9'
+VERSION = '0.6.0'
 
 
 class Bridge:
@@ -54,6 +55,7 @@ class Bridge:
             raise ValueError('OWNER_IDS 和超时配置无效')
         root = Path(os.getenv('DATA_DIR', 'data'))
         root.mkdir(parents=True, exist_ok=True)
+        self.source_lock = root / 'source-control.lock'
         self.settings_file = root / 'performance.json'
         self.download_workers, self.upload_workers = transfer_settings.load(
             self.settings_file, self.download_workers, self.upload_workers)
@@ -397,6 +399,12 @@ class Bridge:
         except ValueError as exc:
             await update.message.reply_text(str(exc))
             raise ApplicationHandlerStop from exc
+        existing = self.store.find_link(update.effective_user.id, link, self.allowed)
+        if existing:
+            await update.message.reply_text(
+                f"该分享已有任务：{existing['state']}\n/folder {existing['id']}\n"
+                f"未完成时续传：/resume {existing['id']}")
+            raise ApplicationHandlerStop
         if self.jobs.full():
             await update.message.reply_text('队列已满，请稍后重试。')
             raise ApplicationHandlerStop
@@ -684,7 +692,7 @@ class Bridge:
 
     async def source_message(self, event):
         job = self.active
-        if not job or event.chat_id not in job['chats']:
+        if not job or job.get('source_owned') is False or event.chat_id not in job['chats']:
             return
         if event.id <= job['baselines'][event.chat_id]:
             return
@@ -779,7 +787,13 @@ class Bridge:
             self.active = job
             self.store.update(job_id, 'running', job['expected'])
             try:
-                await asyncio.wait_for(self.collect_with_recovery(row['link'], job), self.timeout)
+                job['source_owned'] = False
+                async with source_lease(self.source_lock):
+                    job['source_owned'] = True
+                    try:
+                        await asyncio.wait_for(self.collect_with_recovery(row['link'], job), self.timeout)
+                    finally:
+                        job['source_owned'] = False
                 n = self.store.processed_count(job_id)
                 complete = job['expected'] is not None and n == job['expected'] and not job.get('audit_unmatched')
                 detail = '' if complete else '发送已静默，无法确认全部文件已收到。'

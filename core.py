@@ -236,6 +236,19 @@ class Store:
         row = self.db.execute('SELECT * FROM jobs WHERE id=?', (job,)).fetchone()
         return dict(row) if row else None
 
+    def find_link(self, owner, link, allowed):
+        target = parse_link(link, allowed)
+        matches = []
+        for row in self.db.execute('SELECT * FROM jobs WHERE owner=? ORDER BY rowid DESC', (owner,)):
+            try:
+                if parse_link(row['link'], allowed) == target:
+                    matches.append(dict(row))
+            except ValueError:
+                continue
+        return next((row for row in matches if row['state'] == 'complete'),
+                    next((row for row in matches if row['state'] in {'queued','running','cooldown'}),
+                         matches[0] if matches else None))
+
     def files(self, job):
         return [dict(x) for x in self.db.execute(
             '''SELECT f.*, e.name AS source_name, e.size AS file_size, e.kind AS source_kind

@@ -1,0 +1,17 @@
+[Unit]
+Description=Telegram folder link collector
+After=network-online.target sougabot.service
+Wants=network-online.target
+Requires=sougabot.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/tg-folder-bridge
+ExecStart=/root/sougabot/.venv/bin/python -u /root/tg-folder-bridge/collect_links.py run --source SPXM111_bot --target-bot sougabot
+Restart=on-failure
+RestartSec=60
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,6 @@
 # Telegram 文件夹转存机器人
 
-当前说明对应 **Bridge 0.5.9**。通过专用 Telegram 用户账号读取允许访问的分享，将原文件保存到自己的机器人，再用自己的 `file_id` 提供浏览、取回和收藏。Python 3.11–3.13；依赖以 [requirements.txt](requirements.txt) 为准。
+当前说明对应 **Bridge 0.6.0**。通过专用 Telegram 用户账号读取允许访问的分享，将原文件保存到自己的机器人，再用自己的 `file_id` 提供浏览、取回和收藏。Python 3.11–3.13；依赖以 [requirements.txt](requirements.txt) 为准。
 
 ## 用户界面
 
@@ -75,6 +75,10 @@
 
 ## 检查与边界
 
-[GitHub Actions](https://github.com/zwthys-cyber/tg-folder-bridge/actions/workflows/check.yml) 在 Python 3.11、3.12、3.13 上执行编译检查和测试，再打包 Git 跟踪的源码；不需要真实账号、不部署服务，不包含生产媒体或密钥。0.5.9 的检查包括 152 项测试；真实来源菜单、网络吞吐和客户端布局仍需部署端验收。
+[GitHub Actions](https://github.com/zwthys-cyber/tg-folder-bridge/actions/workflows/check.yml) 在 Python 3.11、3.12、3.13 上执行编译检查和测试，再打包 Git 跟踪的源码；不需要真实账号、不部署服务，不包含生产媒体或密钥。检查覆盖转存、界面、采集和任务去重；真实来源菜单、网络吞吐和客户端布局仍需部署端验收。
 
 任务默认空闲等待为 45 秒、原始 `.env.example` 总超时为 3600 秒；下载上传配置工具改为 86400 秒。重启默认恢复先前正在运行/排队/冷却的下载上传任务，未知本地发送结果除外。来源已删除、权限变更、付费或其他交互可能阻止完成；最终以 `/status` 和实际回执为准。
+
+## 自动采集来源目录
+
+[独立链接采集器](COLLECTOR.md) 可逐页点击来源目录序号，读取详情分享链接，自动返回目录。已完成分享跳过，未完成分享续传原任务；一次只向现有转存机器人提交一个任务，采集进度逐项保存。0.6.0 起手动重复 `/fetch` 也返回已有任务，避免重复创建同一分享。
