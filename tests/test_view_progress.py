@@ -8,6 +8,18 @@ from catalog_ui import send_file_page, catalog_page
 
 
 class Browsing(unittest.IsolatedAsyncioTestCase):
+    async def test_old_sessions_keep_old_page_boundaries_after_layout_upgrade(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store=Store(Path(tmp)/'db');store.create('job',7,'link')
+            progress=store.start_view(7,'job');sid=progress.id
+            store.db.execute('UPDATE view_sessions SET layout=0 WHERE id=?',(sid,));store.db.commit()
+            items=[dict(kind='video',file_id=str(i),source_chat=1,source_message=i) for i in range(11)]
+            old=store.view(sid,7);self.assertFalse(old.compact)
+            fresh=store.start_view(7,'job');self.assertTrue(fresh.compact)
+            bot=NS(send_message=AsyncMock(),send_media_group=AsyncMock());single=AsyncMock()
+            await send_file_page(bot,7,dict(id='job'),items,2,single,progress=old)
+            single.assert_awaited_once_with(bot,7,items[-1])
+            store.db.close()
     async def test_details_once_count_receipts_and_keep_state_across_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'db';store=Store(path);store.create('job',7,'link')

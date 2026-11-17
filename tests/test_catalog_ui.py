@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, Mock
-from catalog_ui import catalog_page, send_file_page, folder_details, send_folder_card
+from catalog_ui import catalog_page, send_file_page, folder_details, send_folder_card, file_pages
 
 
 class Catalog(unittest.IsolatedAsyncioTestCase):
@@ -99,11 +99,24 @@ class Catalog(unittest.IsolatedAsyncioTestCase):
         send_one.assert_not_awaited()
         self.assertIn('第 4/4 组', bot.send_message.call_args_list[-1].args[1])
 
-    async def test_eleven_videos_split_at_ten_and_keep_last_video_playable(self):
+    async def test_eleven_videos_balance_tail_and_keep_every_video_playable(self):
         bot = NS(send_message=AsyncMock(), send_media_group=AsyncMock())
         send_one = AsyncMock()
         items = [dict(kind='video', file_id=f'video{i}') for i in range(11)]
         await send_file_page(bot, 7, dict(id='job', title='示例'), items, 1, send_one)
-        self.assertEqual(len(bot.send_media_group.call_args.kwargs['media']),10)
+        self.assertEqual(len(bot.send_media_group.call_args.kwargs['media']),6)
         await send_file_page(bot, 7, dict(id='job', title='示例'), items, 2, send_one)
-        send_one.assert_awaited_once_with(bot,7,items[-1])
+        self.assertEqual([x.media for x in bot.send_media_group.call_args.kwargs['media']],
+                         [x['file_id'] for x in items[6:]])
+        send_one.assert_not_awaited()
+
+    async def test_compact_groups_preserve_order_and_avoid_singletons(self):
+        for pattern in (['video']*21, ['document']*10+['video']*11,
+                        ['document','video']*17, ['photo']+['document']*10,
+                        ['document']*10+['video']+['document']*10):
+            items=[dict(kind=kind,file_id=str(i)) for i,kind in enumerate(pattern)]
+            groups=file_pages(items)
+            self.assertEqual([item for group in groups for item in group],items)
+            self.assertTrue(all(2<=len(group)<=10 for group in groups))
+        self.assertEqual([len(g) for g in file_pages([dict(kind='document')]*10+[dict(kind='video')]*11)],
+                         [10,6,5])

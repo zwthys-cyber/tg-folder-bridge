@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlparse
 class ViewProgress:
     def __init__(self, store, row):
         self.store,self.id,self.job,self.owner=store,row['id'],row['job'],row['owner']
+        self.compact = bool(row.get('layout', 0))
 
     @property
     def details_sent(self):
@@ -156,6 +157,9 @@ class Store:
             );
         ''')
         columns = {x['name'] for x in self.db.execute('PRAGMA table_info(files)')}
+        view_columns = {x['name'] for x in self.db.execute('PRAGMA table_info(view_sessions)')}
+        if 'layout' not in view_columns:
+            self.db.execute('ALTER TABLE view_sessions ADD COLUMN layout INTEGER DEFAULT 0')
         if 'caption' not in columns:
             self.db.execute("ALTER TABLE files ADD COLUMN caption TEXT DEFAULT ''")
         if 'preview_file_id' not in columns:
@@ -327,7 +331,7 @@ class Store:
 
     def start_view(self, owner, job, details_sent=False):
         sid=secrets.token_hex(6)
-        self.db.execute('INSERT INTO view_sessions(id,owner,job,detail_sent) VALUES(?,?,?,?)',
+        self.db.execute('INSERT INTO view_sessions(id,owner,job,detail_sent,layout) VALUES(?,?,?,?,1)',
                         (sid,owner,job,int(details_sent)))
         self.db.commit()
         return self.view(sid,owner)
@@ -337,7 +341,8 @@ class Store:
         return ViewProgress(self,dict(row)) if row else None
 
     def bookmark(self, owner, job):
-        row = self.db.execute('SELECT * FROM bookmarks WHERE owner=? AND job=?', (owner,job)).fetchone()
+        row = self.db.execute('SELECT b.*,v.layout FROM bookmarks b JOIN view_sessions v ON v.id=b.session '
+                              'WHERE b.owner=? AND b.job=?', (owner,job)).fetchone()
         return dict(row) if row else None
 
     def processed_count(self, job):

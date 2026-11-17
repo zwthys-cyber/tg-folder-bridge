@@ -87,7 +87,7 @@ async def send_folder_card(bot, chat, job, items, photo=None, favorite=False, bo
         [favorite_button(job,favorite),InlineKeyboardButton('⭐ 我的收藏',callback_data='bridge_favorites:1')],
         [InlineKeyboardButton('文件夹列表', callback_data='bridge_catalog:1')]]
     if bookmark:
-        page = min(max(1, bookmark['page'] + 1), len(file_pages(items)))
+        page = min(max(1, bookmark['page'] + 1), len(file_pages(items,compact=bool(bookmark.get('layout',0)))))
         rows.insert(1, [InlineKeyboardButton(f'▶️ 继续浏览（第 {page} 组）',
                         callback_data=f"bridge_page:{bookmark['session']}:{page}")])
     keyboard = InlineKeyboardMarkup(rows)
@@ -98,7 +98,7 @@ async def send_folder_card(bot, chat, job, items, photo=None, favorite=False, bo
     return await bot.send_message(chat_id=chat, text=text, parse_mode=None, reply_markup=keyboard)
 
 
-def file_pages(items):
+def file_pages(items, compact=True):
     groups = []
     for item in items:
         family = item['kind'] if item['kind'] in {'document', 'video'} else 'other'
@@ -106,11 +106,26 @@ def file_pages(items):
                 or family != (groups[-1][0]['kind'] if groups[-1][0]['kind'] in {'document', 'video'} else 'other')):
             groups.append([])
         groups[-1].append(item)
+    if compact:
+        i=0
+        while i<len(groups):
+            if len(groups[i])!=1 or len(groups)==1:
+                i+=1
+                continue
+            left=i-1 if i else 0
+            combined=groups[left]+groups[left+1]
+            if len(combined)<=10:
+                groups[left:left+2]=[combined]
+                i=max(0,left)
+            else:
+                middle=(len(combined)+1)//2
+                groups[left:left+2]=[combined[:middle],combined[middle:]]
+                i=left+2
     return groups or [[]]
 
 
 async def send_file_page(bot, chat, job, items, page, send_one, progress=None, favorite=False):
-    groups = file_pages(items)
+    groups = file_pages(items,compact=progress.compact if progress is not None else True)
     pages = len(groups)
     page = max(1, min(page, pages))
     title = job.get('title') or ('文件夹 ' + job['id'][:8])
