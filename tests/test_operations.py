@@ -61,6 +61,16 @@ class OperationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('无需重复',self.app.queue_retry(7,'job'))
         self.assertEqual(self.app.jobs.qsize(),1)
 
+    async def test_completed_share_hides_historical_failure_and_blocks_retry(self):
+        self.app.store.db.execute("UPDATE jobs SET link='https://t.me/EPAN?start=Token' WHERE id='job'")
+        self.app.store.db.commit()
+        self.app.store.create('complete',7,'https://t.me/epan?start=Token')
+        self.app.store.update('complete','complete',3)
+        self.assertEqual(self.app.failed_rows(7),[])
+        self.assertIn('另一任务完成',self.app.queue_retry(7,'job'))
+        self.assertTrue(self.app.jobs.empty())
+        self.assertEqual(self.app.store.get('job')['state'],'partial')
+
     async def test_unknown_delivery_is_never_automatically_retried(self):
         self.app.store.begin_local_send('job',(1,2),'token')
         self.app.schedule_retry('job',ConnectionError())

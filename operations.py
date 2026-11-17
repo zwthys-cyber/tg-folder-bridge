@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from telegram import InlineKeyboardButton as Button, InlineKeyboardMarkup as Keyboard
 from telegram.ext import ApplicationHandlerStop
+from core import parse_link
 import automation_control as control
 
 FAILURES = {'failed', 'partial', 'needs_review', 'blocked', 'interrupted'}
@@ -19,6 +20,27 @@ TRANSIENT = {'ConnectionError', 'TimeoutError', 'OSError', 'URLError', 'ServerEr
 class Operations:
     def controls_root(self):
         return self.settings_file.parent
+
+    def completed_duplicate(self, row):
+        try:
+            result=self.store.find_link(row['owner'],row['link'],getattr(self,'allowed',{'epan','spxm111_bot'}))
+        except ValueError:
+            return None
+        return result if result and result['state']=='complete' and result['id']!=row['id'] else None
+
+    def failed_rows(self, uid):
+        allowed=getattr(self,'allowed',{'epan','spxm111_bot'})
+        completed=set()
+        for row in self.store.db.execute("SELECT link FROM jobs WHERE owner=? AND state='complete'",(uid,)):
+            try:completed.add(parse_link(row[0],allowed))
+            except ValueError:pass
+        result=[]
+        for row in self.store.db.execute("SELECT * FROM jobs WHERE owner=? AND state IN ('failed','partial','needs_review','blocked','interrupted') ORDER BY rowid DESC",(uid,)):
+            try:
+                if parse_link(row['link'],allowed) in completed:continue
+            except ValueError:pass
+            result.append(dict(row))
+        return result
 
     def owner_update(self, update):
         return update.effective_chat.type == 'private' and update.effective_user.id in self.owners
@@ -31,7 +53,7 @@ class Operations:
                  '采集：' + ('已暂停' if control.paused(root, 'collector') else '已启用'),
                  '新转存任务：' + ('已暂停' if control.paused(root, 'transfers') else '已启用'),
                  f"任务：完成 {states.get('complete',0)}，排队 {states.get('queued',0)}，运行 {states.get('running',0)}",
-                 f"待处理失败：{sum(states.get(s,0) for s in FAILURES)}",
+                 f"待处理失败：{len(self.failed_rows(uid))}",
                  f'磁盘可用：{disk.free/1024**3:.1f} / {disk.total/1024**3:.1f} GiB',
                  f'并发上限：下载 {self.download_workers}，上传 {self.upload_workers}']
         active = self.active
@@ -69,8 +91,7 @@ class Operations:
         return '\n\n'.join(lines), keyboard
 
     def failures_panel(self, uid, page):
-        rows = [dict(r) for r in self.store.db.execute(
-            "SELECT * FROM jobs WHERE owner=? AND state IN ('failed','partial','needs_review','blocked','interrupted') ORDER BY rowid DESC", (uid,))]
+        rows = self.failed_rows(uid)
         pages = max(1,(len(rows)+4)//5)
         page = max(1,min(page,pages))
         lines = [f'⚠️ 待处理任务：{len(rows)} 个（第 {page}/{pages} 页）']
@@ -95,6 +116,11 @@ class Operations:
         row = self.store.get(job_id)
         if not row or row['owner'] != uid:
             return '没有这个任务。'
+        duplicate=self.completed_duplicate(row)
+        if duplicate:
+            with self.store.db:
+                self.store.db.execute('UPDATE retry_schedule SET next_at=0 WHERE job=?',(job_id,))
+            return f"该分享已由另一任务完成，无需重复续传。\n/folder {duplicate['id']}"
         if self.store.unknown_local_send(job_id):
             return '上传结果未知，请先检查聊天并使用 /resolve，不能直接重试。'
         if row['state'] not in FAILURES:
