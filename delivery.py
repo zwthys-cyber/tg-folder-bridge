@@ -1,5 +1,6 @@
 """Durable background delivery of one whole folder, using this bot's file_ids."""
 import asyncio
+import contextlib
 import json
 from telegram import InlineKeyboardButton as Button, InlineKeyboardMarkup as Keyboard
 from telegram import InputMediaPhoto, InputMediaVideo, InputMediaDocument
@@ -201,7 +202,7 @@ class WholeDelivery:
             current=self.delivery(sid)
             self.delivery_state(sid,'uncertain' if current['pending'] else 'paused',error=type(error).__name__)
             print('连续发送暂停：'+type(error).__name__,flush=True)
-            with __import__('contextlib').suppress(Exception):
+            with contextlib.suppress(Exception):
                 await self.delivery_status(bot,self.delivery(sid))
 
     async def delivery_loop(self):
@@ -209,7 +210,15 @@ class WholeDelivery:
         while True:
             row=self.store.db.execute("SELECT * FROM deliveries WHERE state='queued' ORDER BY rowid LIMIT 1").fetchone()
             if row:
-                await self.execute_delivery(dict(row))
+                try:
+                    await self.execute_delivery(dict(row))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    current=self.delivery(row['id'])
+                    self.delivery_state(row['id'],'uncertain' if current['pending'] else 'paused',error=type(error).__name__)
+                    print('连续发送状态通知失败：'+type(error).__name__,flush=True)
+                    await asyncio.sleep(1)
             else:
                 await asyncio.sleep(.5)
 
