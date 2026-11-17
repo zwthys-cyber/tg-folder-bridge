@@ -1,6 +1,6 @@
 # Telegram 文件夹转存机器人
 
-当前说明对应 **Bridge 0.10.0**。通过专用 Telegram 用户账号读取允许访问的分享，将原文件保存到自己的机器人，再用自己的 `file_id` 提供浏览、取回和收藏。Python 3.11–3.13；依赖以 [requirements.txt](requirements.txt) 为准。
+当前说明对应 **Bridge 0.10.1**。通过专用 Telegram 用户账号读取允许访问的分享，将原文件保存到自己的机器人，再用自己的 `file_id` 提供浏览、取回和收藏。Python 3.11–3.13；依赖以 [requirements.txt](requirements.txt) 为准。
 
 ## 用户界面
 

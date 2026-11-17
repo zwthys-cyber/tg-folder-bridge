@@ -26,7 +26,7 @@ class Notifications:
         enabled=self.subscribed(uid)
         text=('🔔 新文件夹通知：已开启' if enabled else '🔕 新文件夹通知：未开启')
         text+='\n仅通知订阅后新完成的文件夹，不补发历史更新。'
-        keys=Keyboard([[Button('取消订阅' if enabled else '订阅新文件夹通知',
+        keys=Keyboard([[Button('关闭通知' if enabled else '开启通知',
                                callback_data='bridge_notice:'+('off' if enabled else 'on'))]])
         await bot.send_message(uid,text,reply_markup=keys)
 
