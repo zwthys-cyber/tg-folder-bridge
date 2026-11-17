@@ -24,13 +24,13 @@ def catalog_page(rows, page=1, page_callback_prefix='bridge_catalog', favorites=
     heading = '⭐ 我的收藏' if favorites else '📁 文件夹列表'
     body = [f'{heading}\n\n共 {len(rows)} 个文件夹（第 {page}/{pages} 页）']
     buttons = []
-    for i, row in enumerate(selected, start + 1):
+    for i, row in enumerate(selected, 1):
         title = row['title'] or ('文件夹 ' + row['id'][:8])
         pending = ('，内容核验中' if row.get('audit_public') else
                    '，导入未完成' if row.get('state', 'complete') != 'complete' else '')
         body.append(f"{i}. 📁 {title}（{row['file_count']} 个文件{pending}）")
     for offset in range(0, len(selected), 5):
-        buttons.append([InlineKeyboardButton(str(start + offset + i + 1),
+        buttons.append([InlineKeyboardButton(str(offset + i + 1),
                         callback_data=f"bridge_open:{row['id']}:1")
                         for i, row in enumerate(selected[offset:offset + 5])])
     navigation = []
