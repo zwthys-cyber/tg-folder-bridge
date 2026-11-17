@@ -28,12 +28,13 @@ from content_identity import analyze, preference
 from source_lock import source_lease
 from operations import Operations
 from browse_navigation import BrowseNavigation
+from delivery import WholeDelivery
 import automation_control
 
-VERSION = '0.7.0'
+VERSION = '0.8.0'
 
 
-class Bridge(Operations, BrowseNavigation):
+class Bridge(Operations, BrowseNavigation, WholeDelivery):
     def __init__(self):
         self.owners = {int(x) for x in os.environ['OWNER_IDS'].split(',') if x.strip()}
         self.relay_id = int(os.environ['RELAY_USER_ID'])
@@ -99,6 +100,7 @@ class Bridge(Operations, BrowseNavigation):
         self.search_sessions = {}
         self.pending_jumps = {}
         self.retry_worker = None
+        self.delivery_worker = None
 
     def install(self, app):
         # Negative group runs before ordinary existing bot handlers. Reserve -100.
@@ -124,6 +126,7 @@ class Bridge(Operations, BrowseNavigation):
         app.add_handler(CallbackQueryHandler(self.original, pattern=r'^bridge_original:'), group=-100)
         app.add_handler(CallbackQueryHandler(self.admin_callback, pattern=r'^bridge_admin:'), group=-100)
         app.add_handler(CallbackQueryHandler(self.jump_callback, pattern=r'^bridge_jump:'), group=-100)
+        app.add_handler(CallbackQueryHandler(self.delivery_callback, pattern=r'^bridge_delivery:'), group=-100)
         app.add_handler(CallbackQueryHandler(self.catalog_callback, pattern=r'^bridge_(catalog|open|view|page|search|fav|unfav|favorites):'), group=-100)
         app.add_handler(MessageHandler(filters.Regex(r'^https://t\.me/\w+\?start='),
                                        self.fetch), group=-100)
@@ -154,6 +157,7 @@ class Bridge(Operations, BrowseNavigation):
         self.resume_after_upgrade()
         self.recovery_worker = asyncio.create_task(self.restore_jobs())
         self.retry_worker = asyncio.create_task(self.retry_loop())
+        self.delivery_worker = asyncio.create_task(self.delivery_loop())
 
     async def restore_jobs(self):
         if not self.auto_resume or self.transfer_mode != 'download_upload':
@@ -247,7 +251,7 @@ class Bridge(Operations, BrowseNavigation):
     async def help_command(self, update, context):
         if update.effective_chat.type != 'private':
             raise ApplicationHandlerStop
-        text = '发送 /start 查看文件夹列表，点击编号打开文件夹。\n文件按组显示缩略图、文件名和大小，重新打开可继续浏览。\n/page 页码 跳转目录；也可点击列表中的跳转按钮。\n发送 /favorites 查看我的收藏。\n直接发送关键词搜索文件夹名称，也可搜索原收录资源。'
+        text = '发送 /start 查看文件夹列表，点击编号打开详情。\n点击“查看内容”会连续发送整个文件夹，不需点击下一组；发送中可停止。\n/page 页码 跳转目录；也可点击列表中的跳转按钮。\n发送 /favorites 查看我的收藏。\n直接发送关键词搜索文件夹名称，也可搜索原收录资源。'
         if update.effective_user.id in self.owners:
             text += '\n\n管理员：\n/admin 控制面板\n/failures 失败任务\n/fetch 分享链接\n/folders 导入任务\n/status 任务编号\n/resume 任务编号\n/speed 下载并发 上传并发\n/add 标题 | 链接 | 关键词\n/delete 编号'
         await update.message.reply_text(text)
@@ -289,6 +293,11 @@ class Bridge(Operations, BrowseNavigation):
             raise ApplicationHandlerStop
         try:
             parts = query.data.split(':')
+            if parts[0]=='bridge_view' and len(parts)==3 and parts[2]=='1':
+                await query.answer()
+                await self.queue_whole_folder(context.bot,update.effective_user.id,
+                    self.store.get(parts[1]),query.message.message_id)
+                raise ApplicationHandlerStop
             if parts[0] in {'bridge_catalog','bridge_favorites'}:
                 page = int(parts[1])
                 await query.answer()
@@ -381,12 +390,15 @@ class Bridge(Operations, BrowseNavigation):
             except Exception as exc:
                 print('文件夹封面暂不可用：' + type(exc).__name__, flush=True)
         reply = await send_folder_card(bot, chat, job, items, photo,
-                                       favorite=self.store.is_favorite(chat,job['id']),
-                                       bookmark=self.store.bookmark(chat,job['id']))
+                                       favorite=self.store.is_favorite(chat,job['id']))
         if photo and getattr(reply, 'photo', None):
             self.store.set_cover(job['id'], reply.photo[-1].file_id)
 
     async def stop(self, app):
+        if self.delivery_worker:
+            self.delivery_worker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self.delivery_worker
         if self.retry_worker:
             self.retry_worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):

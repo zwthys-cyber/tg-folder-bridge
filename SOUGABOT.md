@@ -1,4 +1,4 @@
-# 接入已有 sougabot（0.7.0）
+# 接入已有 sougabot（0.8.0）
 
 目标为 Python 3.13、urllib 调用 Bot API、唯一的 getUpdates 长轮询、systemd 服务 `sougabot`。示例路径为 `/root/sougabot` 和 `/root/tg-folder-bridge`；现有搜索数据库保持在 `/root/sougabot/resources.db`。
 

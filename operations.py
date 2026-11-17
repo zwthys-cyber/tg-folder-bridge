@@ -61,6 +61,9 @@ class Operations:
             row = self.store.get(active['id'])
             if row and row['owner'] == uid:
                 lines.append(f"当前：{row['title'] or row['id']}\n{row['detail'][:600]}")
+        deliveries=dict(self.store.db.execute('SELECT state,count(*) FROM deliveries GROUP BY state'))
+        lines.append(f"用户内容发送：排队 {deliveries.get('queued',0)}，运行 {deliveries.get('running',0)}，"
+                     f"停止 {deliveries.get('paused',0)}，待确认 {deliveries.get('uncertain',0)}")
         collector = root / 'collector.sqlite3'
         heartbeat = root / 'collector-heartbeat.json'
         if heartbeat.exists():

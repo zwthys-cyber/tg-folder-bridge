@@ -121,6 +121,11 @@ class Store:
             CREATE TABLE IF NOT EXISTS bookmarks (
                 owner INTEGER, job TEXT, page INTEGER, session TEXT, PRIMARY KEY(owner,job)
             );
+            CREATE TABLE IF NOT EXISTS deliveries (
+                id TEXT PRIMARY KEY, owner INTEGER, job TEXT, origin INTEGER,
+                state TEXT, plan TEXT, pending TEXT DEFAULT '', error TEXT DEFAULT '',
+                UNIQUE(owner,job,origin)
+            );
             CREATE TABLE IF NOT EXISTS retry_schedule (
                 job TEXT PRIMARY KEY, attempts INTEGER DEFAULT 0, next_at REAL DEFAULT 0
             );

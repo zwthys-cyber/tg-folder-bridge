@@ -81,15 +81,11 @@ def favorite_button(job, saved=False):
         callback_data=f"{'bridge_unfav' if saved else 'bridge_fav'}:{job['id']}")
 
 
-async def send_folder_card(bot, chat, job, items, photo=None, favorite=False, bookmark=None):
+async def send_folder_card(bot, chat, job, items, photo=None, favorite=False):
     rows = [
         [InlineKeyboardButton('查看内容', callback_data=f"bridge_view:{job['id']}:1")],
         [favorite_button(job,favorite),InlineKeyboardButton('⭐ 我的收藏',callback_data='bridge_favorites:1')],
         [InlineKeyboardButton('文件夹列表', callback_data='bridge_catalog:1')]]
-    if bookmark:
-        page = min(max(1, bookmark['page'] + 1), len(file_pages(items,compact=bool(bookmark.get('layout',0)))))
-        rows.insert(1, [InlineKeyboardButton(f'▶️ 继续浏览（第 {page} 组）',
-                        callback_data=f"bridge_page:{bookmark['session']}:{page}")])
     keyboard = InlineKeyboardMarkup(rows)
     text = folder_details(job, items, starting=False)
     if photo:
@@ -189,5 +185,3 @@ async def send_file_page(bot, chat, job, items, page, send_one, progress=None, f
             text = f'✅ 当前组发送完成\n\n已发送 {received} / {len(items)} 个文件\n共发送 {progress.message_count} 条消息'
     await bot.send_message(chat, text,
                            reply_markup=InlineKeyboardMarkup(keyboard))
-    if progress is not None:
-        progress.bookmark(page)

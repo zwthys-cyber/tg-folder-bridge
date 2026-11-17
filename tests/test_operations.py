@@ -127,21 +127,20 @@ class OperationsTests(unittest.IsolatedAsyncioTestCase):
         bot.send_message.assert_not_awaited()
         self.assertIn('1–1',self.update.message.reply_text.call_args.args[0])
 
-    async def test_bookmark_saved_after_success_and_private(self):
+    async def test_browsing_progress_is_not_recorded_or_exposed(self):
         items=[dict(kind='document',file_id=str(i),source_chat=1,source_message=i) for i in range(12)]
         progress=self.app.store.start_view(7,'job')
         bot=NS(send_message=AsyncMock(),send_media_group=AsyncMock())
         await send_file_page(bot,7,dict(id='job'),items,1,AsyncMock(),progress=progress)
-        saved=self.app.store.bookmark(7,'job')
-        self.assertEqual(saved['page'],1)
+        self.assertIsNone(self.app.store.bookmark(7,'job'))
         self.assertIsNone(self.app.store.bookmark(8,'job'))
-        await send_folder_card(bot,7,dict(id='job'),items,bookmark=saved)
-        button=bot.send_message.call_args.kwargs['reply_markup'].inline_keyboard[1][0]
-        self.assertEqual(button.callback_data,f'bridge_page:{progress.id}:2')
+        await send_folder_card(bot,7,dict(id='job'),items)
+        keys=bot.send_message.call_args.kwargs['reply_markup'].inline_keyboard
+        self.assertFalse(any('继续浏览' in b.text for row in keys for b in row))
         bot.send_media_group.side_effect=RuntimeError('send failed')
         with self.assertRaises(RuntimeError):
             await send_file_page(bot,7,dict(id='job'),items,2,AsyncMock(),progress=progress)
-        self.assertEqual(self.app.store.bookmark(7,'job')['page'],1)
+        self.assertIsNone(self.app.store.bookmark(7,'job'))
 
 
 class BackupTests(unittest.TestCase):

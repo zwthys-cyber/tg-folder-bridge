@@ -20,7 +20,7 @@ def is_bridge_update(raw, relay_id):
     if (isinstance(callback.get('data'), str)
             and callback['data'].startswith(('bridge_original:', 'bridge_catalog:', 'bridge_open:', 'bridge_view:', 'bridge_page:',
                                              'bridge_fav:', 'bridge_unfav:', 'bridge_favorites:', 'bridge_search:',
-                                             'bridge_jump:', 'bridge_admin:'))
+                                             'bridge_jump:', 'bridge_admin:', 'bridge_delivery:'))
             and callback.get('message', {}).get('chat', {}).get('type') == 'private'):
         return True
     message = raw.get('message')
