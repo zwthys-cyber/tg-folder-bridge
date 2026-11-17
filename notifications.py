@@ -65,6 +65,10 @@ class Notifications:
             self.store.db.execute("UPDATE notice_queue SET state='unknown',error='InterruptedSend' WHERE state='sending'")
 
     async def send_notice(self,row):
+        current=self.store.db.execute('SELECT state,attempts FROM notice_queue WHERE job=? AND owner=?',
+                                      (row['job'],row['owner'])).fetchone()
+        if not current or current['state']!='queued':return
+        row=dict(row,attempts=current['attempts'])
         job=self.store.get(row['job'])
         if not self.subscribed(row['owner']) or not job or (job['state']!='complete' and not job.get('audit_public')):
             with self.store.db:
@@ -76,8 +80,9 @@ class Notifications:
                        [Button('取消更新通知',callback_data='bridge_notice:off')]])
         state,error,next_at='sent','',0
         with self.store.db:
-            self.store.db.execute("UPDATE notice_queue SET state='sending',attempts=attempts+1 WHERE job=? AND owner=?",
-                                  (row['job'],row['owner']))
+            claimed=self.store.db.execute("UPDATE notice_queue SET state='sending',attempts=attempts+1 "
+                                          "WHERE job=? AND owner=? AND state='queued'",(row['job'],row['owner'])).rowcount
+        if not claimed:return
         try:
             await self.app.bot.send_message(row['owner'],text,reply_markup=keys)
         except asyncio.CancelledError:

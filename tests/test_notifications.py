@@ -33,6 +33,7 @@ class Notices(unittest.IsolatedAsyncioTestCase):
         self.complete();self.app.publish_ready()
         row=self.queued();self.assertEqual(row['owner'],7)
         await self.app.send_notice(row)
+        await self.app.send_notice(row)
         self.assertIsNone(self.queued());self.bot.send_message.assert_awaited_once()
         keys=self.bot.send_message.call_args.kwargs['reply_markup'].inline_keyboard
         self.assertEqual(keys[0][0].callback_data,'bridge_open:new:1')
