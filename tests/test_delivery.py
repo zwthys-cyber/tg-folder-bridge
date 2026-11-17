@@ -21,7 +21,7 @@ class WholeFolder(unittest.IsolatedAsyncioTestCase):
         self.tmp=tempfile.TemporaryDirectory();self.path=Path(self.tmp.name)/'index.sqlite3'
         self.app=Runtime();self.app.store=Store(self.path)
         self.bot=NS(send_message=AsyncMock(),send_media_group=AsyncMock(),send_document=AsyncMock(),
-                    send_video=AsyncMock(),send_photo=AsyncMock())
+                    send_video=AsyncMock(),send_photo=AsyncMock(),edit_message_reply_markup=AsyncMock())
         self.app.app=NS(bot=self.bot)
         self.app.store.create('job',7,'link');self.app.store.update('job','complete',21)
         pattern=['document']*8+['video']*2+['document']+['video']*5+['document']+['video']*4
@@ -38,7 +38,7 @@ class WholeFolder(unittest.IsolatedAsyncioTestCase):
         return dict(row) if row else None
 
     async def callback(self,row,action,uid=7):
-        query=NS(data=f"bridge_delivery:{row['id']}:{action}",answer=AsyncMock())
+        query=NS(data=f"bridge_delivery:{row['id']}:{action}",answer=AsyncMock(),message=NS(message_id=55))
         update=NS(callback_query=query,effective_user=NS(id=uid),effective_chat=NS(type='private',id=uid))
         with self.assertRaises(ApplicationHandlerStop):
             await self.app.delivery_callback(update,NS(bot=self.bot))
