@@ -107,6 +107,13 @@ def file_pages(items, compact=True):
             groups.append([])
         groups[-1].append(item)
     if compact:
+        packed=[]
+        for group in groups:
+            if packed and len(packed[-1])+len(group)<=10:
+                packed[-1].extend(group)
+            else:
+                packed.append(list(group))
+        groups=packed
         i=0
         while i<len(groups):
             if len(groups[i])!=1 or len(groups)==1:

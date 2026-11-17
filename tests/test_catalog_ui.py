@@ -120,3 +120,11 @@ class Catalog(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(2<=len(group)<=10 for group in groups))
         self.assertEqual([len(g) for g in file_pages([dict(kind='document')]*10+[dict(kind='video')]*11)],
                          [10,6,5])
+
+    async def test_interleaved_1034_shape_packs_browsing_pages_without_reordering(self):
+        pattern=['document']*8+['video']*2+['document']+['video']*5+['document']+['video']*4
+        items=[dict(kind=k,file_id=str(i)) for i,k in enumerate(pattern)]
+        self.assertEqual([len(g) for g in file_pages(items,compact=False)],[8,2,1,5,1,4])
+        groups=file_pages(items)
+        self.assertEqual([len(g) for g in groups],[10,7,4])
+        self.assertEqual([x for g in groups for x in g],items)
