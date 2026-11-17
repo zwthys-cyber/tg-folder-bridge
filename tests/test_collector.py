@@ -149,3 +149,27 @@ class MenuTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ledger.page('source'), (41, 106, 0))
         self.assertEqual(ledger.next()['link'], 'new-link')
         ledger.db.close()
+
+    async def test_page_navigation_uses_real_page_protocol_not_detail_back(self):
+        m = NS(raw_text='共1052个文件夹（第1/106页）',
+               buttons=[[NS(text='1', data=b'folder_preview_list/1/1/list'),
+                         NS(text='下一页', data=b'folders_list_page/2')]])
+        catalog = Catalog(NS(), 'source', {'epan'})
+        catalog.find_panel = AsyncMock(return_value=m)
+        catalog.click = AsyncMock(return_value=NS())
+        await catalog.page(2)
+        self.assertEqual(catalog.click.await_args.args[1], b'folders_list_page/2')
+        await catalog.page(1)
+        self.assertEqual(catalog.click.await_count, 1)
+
+    async def test_resume_from_detail_returns_before_paging(self):
+        detail = NS(raw_text='详情', buttons=[[NS(text='文件夹列表', data=b'back_to_folders_list_user/2')]])
+        listing = NS(raw_text='共1052个文件夹（第2/106页）',
+                     buttons=[[NS(text='1', data=b'folder_preview_list/1/2/list'),
+                               NS(text='上一页', data=b'folders_list_page/1')]])
+        catalog = Catalog(NS(), 'source', {'epan'})
+        catalog.find_panel = AsyncMock(return_value=detail)
+        catalog.click = AsyncMock(side_effect=[listing, NS()])
+        await catalog.page(1)
+        self.assertEqual([c.args[1] for c in catalog.click.await_args_list],
+                         [b'back_to_folders_list_user/2', b'folders_list_page/1'])

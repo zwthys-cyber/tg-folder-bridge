@@ -76,10 +76,22 @@ class Catalog:
     async def page(self, wanted):
         message = await self.find_panel()
         page = list_page(message)
+        if not page:
+            backs = [b for b in buttons(message) if '文件夹列表' in b.text and b.data]
+            if len(backs) != 1:
+                raise MenuChangedError('没有找到详情的返回目录按钮。')
+            message = await self.click(message, backs[0].data, lambda m: list_page(m) is not None)
+            page = list_page(message)
         if page and page[0] == wanted:
             return message
-        # This exact adapter protocol is observed in this bot's real list/detail keyboards.
-        return await self.click(message, f'back_to_folders_list_user/{wanted}'.encode(),
+        # Return-from-detail and list pagination are different source protocols.
+        # Derive page navigation only from a real, currently displayed page button.
+        navigation = [b.data for b in buttons(message)
+                      if b.data and re.fullmatch(rb'folders_list_page/\d+', b.data)]
+        if not navigation or not 1 <= wanted <= page[1]:
+            raise MenuChangedError('目录翻页按钮发生变化或页码已失效。')
+        data = navigation[0].rsplit(b'/', 1)[0] + b'/' + str(wanted).encode()
+        return await self.click(message, data,
                                 lambda m: bool(list_page(m) and list_page(m)[0] == wanted))
 
     async def scan_page(self, ledger, head=False):
