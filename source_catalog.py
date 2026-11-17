@@ -82,10 +82,12 @@ class Catalog:
         return await self.click(message, f'back_to_folders_list_user/{wanted}'.encode(),
                                 lambda m: bool(list_page(m) and list_page(m)[0] == wanted))
 
-    async def scan_page(self, ledger):
+    async def scan_page(self, ledger, head=False):
         wanted, _, finished = ledger.page(self.source)
-        if finished:
+        if finished and not head:
             return False
+        if head:
+            wanted = 1
         message = await self.page(wanted)
         page, total, numbers = list_page(message)
         # Snapshot callbacks; return to this same page before each subsequent number.
@@ -101,6 +103,9 @@ class Catalog:
                 raise MenuChangedError('详情的返回目录按钮发生变化。')
             message = await self.click(detail, backs[0].data,
                                        lambda m: bool(list_page(m) and list_page(m)[0] == page))
-        ledger.advance(self.source, page, total)
+        if not head:
+            ledger.advance(self.source, page, total)
+        if page == 1:
+            ledger.checked_head(self.source)
         print(f'已扫描目录 {page}/{total} 页；累计状态 {ledger.summary()}', flush=True)
         return True

@@ -137,3 +137,15 @@ class MenuTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(entered.is_set())
             await asyncio.wait_for(task, 1)
             self.assertTrue(entered.is_set())
+
+    async def test_new_head_folder_does_not_reset_main_cursor_and_has_priority(self):
+        ledger = Ledger(':memory:')
+        ledger.add('source', 'old', '文件夹1039', 'old-link')
+        ledger.advance('source', 40, 106)
+        self.assertTrue(ledger.head_due('source'))
+        ledger.add('source', 'new', '文件夹1052', 'new-link')
+        ledger.checked_head('source')
+        self.assertFalse(ledger.head_due('source'))
+        self.assertEqual(ledger.page('source'), (41, 106, 0))
+        self.assertEqual(ledger.next()['link'], 'new-link')
+        ledger.db.close()

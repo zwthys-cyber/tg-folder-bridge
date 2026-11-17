@@ -45,7 +45,8 @@ def safe_to_dispatch(index, rows, root):
     cooldown = root / 'rate-limit.json'
     if cooldown.exists():
         # The bridge handles actual cooldown when a task is queued.
-        json.loads(cooldown.read_text())  # Corrupt shared state is never ignored.
+        if float(json.loads(cooldown.read_text())['until']) > time.time():
+            return False
     return True
 
 
@@ -57,7 +58,7 @@ async def dispatch(client, target, ledger, index, owner, allowed, root):
     # Unknown command delivery must be reconciled, never blindly repeated.
     if ledger.db.execute("SELECT 1 FROM items WHERE state='dispatching' LIMIT 1").fetchone():
         return False
-    for item in ledger.db.execute("SELECT * FROM items WHERE state NOT IN ('complete','review','submitted') ORDER BY rowid").fetchall():
+    for item in ledger.db.execute("SELECT * FROM items WHERE state NOT IN ('complete','review','submitted') ORDER BY priority DESC,rowid").fetchall():
         job = jobs.get(item['link'])
         if job and job['state'] == 'complete':
             ledger.set_state(item, 'complete', job['id'])
@@ -108,6 +109,11 @@ async def operate(args, config, root, ledger):
                     rows, jobs = existing_jobs(root / 'index.sqlite3', owner, allowed)
                     ledger.reconcile(jobs)
                     if safe_to_dispatch(root / 'index.sqlite3', rows, root):
+                        if ledger.head_due(args.source):
+                            async with source_lease(root / 'source-control.lock'):
+                                await catalog.scan_page(ledger, head=True)
+                            _, jobs = existing_jobs(root / 'index.sqlite3', owner, allowed)
+                            ledger.reconcile(jobs)
                         ready = ledger.db.execute("SELECT 1 FROM items WHERE state='ready' LIMIT 1").fetchone()
                         if not ready:
                             async with source_lease(root / 'source-control.lock'):

@@ -1,5 +1,7 @@
 """Collector ledger and read-only reconciliation with the bridge database."""
 import sqlite3
+import re
+import time
 from pathlib import Path
 from urllib.parse import urlencode
 from core import parse_link
@@ -48,12 +50,19 @@ class Ledger:
             CREATE TABLE IF NOT EXISTS discoveries (
                 source TEXT, item_key TEXT, PRIMARY KEY(source,item_key)
             );
+            CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value REAL);
         ''')
+        columns = {r[1] for r in self.db.execute('PRAGMA table_info(items)')}
+        if 'priority' not in columns:
+            self.db.execute('ALTER TABLE items ADD COLUMN priority INTEGER DEFAULT 0')
+            self.db.commit()
 
     def add(self, source, key, title, link):
         with self.db:
-            self.db.execute('INSERT OR IGNORE INTO items(source,item_key,title,link) VALUES(?,?,?,?)',
-                            (source, key, title, link))
+            suffix = re.search(r'(\d+)\s*$', title)
+            priority = int(suffix[1]) if suffix else 0
+            self.db.execute('INSERT OR IGNORE INTO items(source,item_key,title,link,priority) VALUES(?,?,?,?,?)',
+                            (source, key, title, link, priority))
             self.db.execute('INSERT OR IGNORE INTO discoveries VALUES(?,?)', (source, key))
 
     def seen(self, source, key):
@@ -88,8 +97,16 @@ class Ledger:
             self.set_state(row, state, job['id'])
 
     def next(self):
-        row = self.db.execute("SELECT * FROM items WHERE state='ready' ORDER BY rowid LIMIT 1").fetchone()
+        row = self.db.execute("SELECT * FROM items WHERE state='ready' ORDER BY priority DESC,rowid LIMIT 1").fetchone()
         return dict(row) if row else None
+
+    def head_due(self, source, interval=600):
+        row = self.db.execute('SELECT value FROM settings WHERE key=?', ('head:' + source,)).fetchone()
+        return not row or time.time() - row[0] >= interval
+
+    def checked_head(self, source):
+        with self.db:
+            self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)', ('head:' + source, time.time()))
 
     def summary(self):
         return dict(self.db.execute('SELECT state,count(*) FROM items GROUP BY state'))
