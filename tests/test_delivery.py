@@ -141,6 +141,37 @@ class WholeFolder(unittest.IsolatedAsyncioTestCase):
         ordered=display_order(original)
         self.assertIs(ordered[0],original[0])
 
+    async def test_capture_dates_reach_the_final_album_and_single_send_calls(self):
+        dates={10:'2026-10-23',16:'2026-10-17',0:'2026-10-06',1:'2025-05-04',
+               9:'2026-10-23',11:'2026-10-17',8:'2026-10-06',12:'2025-05-04'}
+        for message,date in dates.items():
+            self.app.store.set_capture_time('job',(1,message),dict(captured_at=date+'T00:00:00Z',
+                capture_time_source='video.com.apple.quicktime.creationdate'))
+        original=self.app.store.files('job')
+        expected=[str(i) for i in [10,16,0,1,2,3,4,5,6,7,9,11,8,12,13,14,15,17,18,19,20]]
+        row=await self.enqueue()
+        self.assertEqual([x['file_id'] for x in json.loads(row['plan'])],expected)
+        emitted=[]
+        async def album(**kwargs):emitted.extend(x.media for x in kwargs['media'])
+        async def video(**kwargs):emitted.append(kwargs['video'])
+        self.bot.send_media_group.side_effect=album
+        self.bot.send_video.side_effect=video
+        await self.app.execute_delivery(row)
+        self.assertEqual(self.app.delivery(row['id'])['state'],'complete')
+        self.assertEqual(emitted,expected)
+        self.assertEqual(self.app.store.files('job'),original)
+
+    async def test_later_metadata_does_not_reorder_an_existing_delivery(self):
+        row=await self.enqueue()
+        frozen=row['plan']
+        self.app.store.set_capture_time('job',(1,10),dict(captured_at='2026-10-23T00:00:00Z',
+            capture_time_source='video.com.apple.quicktime.creationdate'))
+        self.assertEqual(self.app.delivery(row['id'])['plan'],frozen)
+        self.app.delivery_state(row['id'],'complete')
+        newer=await self.enqueue(origin=43)
+        self.assertEqual(json.loads(newer['plan'])[0]['file_id'],'10')
+        self.assertEqual(self.app.delivery(row['id'])['plan'],frozen)
+
     async def test_normal_delivery_buttons_have_no_stop_or_browsing_progress(self):
         row=await self.enqueue()
         labels=[b.text for line in self.app.delivery_keys(row).inline_keyboard for b in line]
