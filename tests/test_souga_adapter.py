@@ -18,7 +18,7 @@ def raw_message(text='', user=7, **media):
 
 class Routing(unittest.TestCase):
     def test_commands_and_share_link_are_routed(self):
-        for text in ('/start', '/favorites', '/help', '/speed 32 32', '/transport 2', '/diagnostics', '/fetch https://t.me/epan?start=x', '/folders', '/folder id 2', '/status id', '/resume id',
+        for text in ('/start', '/favorites', '/help', '/admin', '/failures', '/page 2', '/cancel', '/speed 32 32', '/transport 2', '/diagnostics', '/fetch https://t.me/epan?start=x', '/folders', '/folder id 2', '/status id', '/resume id',
                      'https://t.me/epan?start=x'):
             self.assertTrue(is_bridge_update(raw_message(text), 7))
 
@@ -33,7 +33,8 @@ class Routing(unittest.TestCase):
         self.assertTrue(is_bridge_update(query, 7))
         query['callback_query']['data'] = 'bridge_view:job:1'
         self.assertTrue(is_bridge_update(query, 7))
-        for data in ('bridge_page:session:2','bridge_fav:job','bridge_unfav:job','bridge_favorites:1'):
+        for data in ('bridge_page:session:2','bridge_fav:job','bridge_unfav:job','bridge_favorites:1',
+                     'bridge_jump:bridge_catalog','bridge_jump:bridge_search:token','bridge_admin:panel','bridge_admin:transfers'):
             query['callback_query']['data']=data
             self.assertTrue(is_bridge_update(query,7))
         query['callback_query']['data'] = 'searchkey:5'
@@ -50,7 +51,7 @@ class Routing(unittest.TestCase):
 class Lifecycle(unittest.TestCase):
     def test_feed_raw_update_without_starting_an_updater(self):
         bridge = NS(relay_id=7, install=Mock(), start=AsyncMock(), stop=AsyncMock(),
-                    search_text=AsyncMock(return_value=False))
+                    search_text=AsyncMock(return_value=False),handle_jump_reply=AsyncMock(return_value=True))
         app = NS(bot=Bot('123456:TEST_TOKEN'), initialize=AsyncMock(),
                  start=AsyncMock(), stop=AsyncMock(), shutdown=AsyncMock(),
                  process_update=AsyncMock(), running=True)
@@ -73,6 +74,14 @@ class Lifecycle(unittest.TestCase):
                     self.assertTrue(adapter.handle_update(raw_message('/folders')))
                     app.process_update.assert_awaited_once()
                     self.assertEqual(app.process_update.call_args.args[0].update_id, 12)
+                    self.assertTrue(adapter.handle_update(raw_message('/admin')))
+                    self.assertTrue(adapter.handle_update({'update_id':13,'callback_query':{
+                        'id':'query','chat_instance':'test','from':{'id':7,'is_bot':False,'first_name':'Test'},
+                        'data':'bridge_jump:bridge_catalog','message':raw_message()['message']}}))
+                    bridge.search_text.reset_mock()
+                    self.assertTrue(adapter.handle_update(raw_message('2',reply_to_message=raw_message()['message'])))
+                    bridge.handle_jump_reply.assert_awaited_once()
+                    bridge.search_text.assert_not_awaited()
                     builder.token.return_value.updater.assert_called_once_with(None)
                     bridge.start.assert_awaited_once_with(app)
                 finally:

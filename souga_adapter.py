@@ -10,7 +10,7 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from pathlib import Path
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import Application
+from telegram.ext import Application, CallbackContext
 from bridge import Bridge
 from bot_api_config import configure
 
@@ -19,7 +19,8 @@ def is_bridge_update(raw, relay_id):
     callback = raw.get('callback_query', {})
     if (isinstance(callback.get('data'), str)
             and callback['data'].startswith(('bridge_original:', 'bridge_catalog:', 'bridge_open:', 'bridge_view:', 'bridge_page:',
-                                             'bridge_fav:', 'bridge_unfav:', 'bridge_favorites:', 'bridge_search:'))
+                                             'bridge_fav:', 'bridge_unfav:', 'bridge_favorites:', 'bridge_search:',
+                                             'bridge_jump:', 'bridge_admin:'))
             and callback.get('message', {}).get('chat', {}).get('type') == 'private'):
         return True
     message = raw.get('message')
@@ -28,7 +29,7 @@ def is_bridge_update(raw, relay_id):
     if message.get('chat', {}).get('type') != 'private':
         return False
     text = message.get('text', '').strip()
-    if re.match(r'^/(start|help|favorites|fetch|folder|folders|status|resume|speed|transport|diagnostics|resolve|dedup)(?:@\w+)?(?:\s|$)', text):
+    if re.match(r'^/(start|help|favorites|fetch|folder|folders|status|resume|speed|transport|diagnostics|resolve|dedup|admin|failures|page|cancel)(?:@\w+)?(?:\s|$)', text):
         return True
     if re.match(r'^https://t\.me/\w+\?start=', text):
         return True
@@ -104,6 +105,14 @@ class SougaBridge:
             text = message.get('text', '').strip()
             if (message.get('chat', {}).get('type') == 'private' and 0 < len(text) <= 100
                     and not text.startswith('/')):
+                if message.get('reply_to_message'):
+                    async def reply_or_search():
+                        update=Update.de_json(raw,self.app.bot)
+                        context=CallbackContext.from_update(update,self.app)
+                        if await self.bridge.handle_jump_reply(update,context,text):
+                            return True
+                        return await self.bridge.search_text(message['chat']['id'],message['from']['id'],text)
+                    return self._submit(reply_or_search())
                 return self._submit(self.bridge.search_text(message['chat']['id'], message['from']['id'], text))
             return False
 

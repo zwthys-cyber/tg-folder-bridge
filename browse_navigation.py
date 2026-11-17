@@ -57,7 +57,7 @@ class BrowseNavigation:
         await query.answer()
         pages=max(1,(len(rows)+9)//10)
         prompt=await context.bot.send_message(update.effective_chat.id,
-            f'请回复要跳转的页码（1–{pages}），发送 /cancel 取消。',reply_markup=ForceReply(selective=True))
+            f'请回复要跳转的页码（1–{pages}），发送 /cancel 取消。',reply_markup=ForceReply(selective=False))
         if len(self.pending_jumps)>=1000:
             self.pending_jumps.pop(next(iter(self.pending_jumps)))
         self.pending_jumps[(update.effective_chat.id,update.effective_user.id)] = (prefix,prompt.message_id,time.time()+300)
