@@ -1,4 +1,5 @@
 """Telegram-native folder lists and file albums."""
+import re
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaDocument, InputMediaVideo
 
 
@@ -11,6 +12,11 @@ def resource_summary(stats):
 
 
 def catalog_page(rows, page=1, page_callback_prefix='bridge_catalog', favorites=False):
+    def number(row):
+        match=re.search(r'(\d+)\s*$',row.get('title') or '')
+        return (1,int(match[1])) if match else (0,0)
+    # Sort before slicing pages; keep input order for equal/missing numbers.
+    rows=sorted(rows,key=number,reverse=True)
     pages = max(1, (len(rows) + 9) // 10)
     page = max(1, min(page, pages))
     start = (page - 1) * 10

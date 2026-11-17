@@ -9,12 +9,23 @@ class Catalog(unittest.IsolatedAsyncioTestCase):
         rows = [dict(id=f'job{i}', title=f'文件夹{i}', file_count=i+1) for i in range(12)]
         text, keyboard = catalog_page(rows)
         self.assertIn('共 12 个文件夹', text)
-        self.assertIn('文件夹0（1 个文件）', text)
-        self.assertEqual(keyboard.inline_keyboard[0][0].callback_data, 'bridge_open:job0:1')
+        self.assertIn('文件夹11（12 个文件）', text)
+        self.assertEqual(keyboard.inline_keyboard[0][0].callback_data, 'bridge_open:job11:1')
         self.assertEqual(keyboard.inline_keyboard[-1][0].callback_data, 'bridge_catalog:2')
         text, keyboard = catalog_page(rows, 2)
-        self.assertIn('11. 📁 文件夹10', text)
+        self.assertIn('11. 📁 文件夹1', text)
         self.assertEqual(keyboard.inline_keyboard[0][0].text, '11')
+
+    async def test_folder_number_sort_is_numeric_stable_and_shared_with_favorites(self):
+        numbers=[1045,1046,1048,1049,1050,1051,1047]
+        rows=[dict(id=str(n),title=f'示例{n}',file_count=1) for n in numbers]
+        original=list(rows)
+        for favorites in (False,True):
+            text,keyboard=catalog_page(rows,favorites=favorites)
+            self.assertEqual([b.callback_data for row in keyboard.inline_keyboard for b in row if b.text.isdigit()],
+                [f'bridge_open:{n}:1' for n in sorted(numbers,reverse=True)])
+            self.assertIn('1. 📁 示例1051',text)
+        self.assertEqual(rows,original)
 
     async def test_files_use_native_document_album_and_next_group_button(self):
         bot = NS(send_message=AsyncMock(), send_media_group=AsyncMock())

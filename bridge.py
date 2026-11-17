@@ -26,7 +26,7 @@ from bot_api_config import endpoint, LOCAL
 from local_upload import eligible, send_local, DeliveryUnknownError
 from content_identity import analyze, preference
 
-VERSION = '0.5.8'
+VERSION = '0.5.9'
 
 
 class Bridge:
