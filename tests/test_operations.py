@@ -90,6 +90,52 @@ class OperationsTests(unittest.IsolatedAsyncioTestCase):
         self.app.schedule_retry('job',ValueError())
         self.assertEqual(self.app.store.db.execute('select attempts from retry_schedule').fetchone()[0],4)
 
+    async def test_short_delivery_uses_persistent_shared_retry_budget(self):
+        job=dict(id='job',expected=3)
+        self.app.store.update('job','needs_review',3)
+        self.assertEqual(self.app.schedule_incomplete(job),60)
+        self.app.store.db.close()
+        self.app.store=Store(self.root/'index.sqlite3')
+        self.assertEqual(self.app.schedule_incomplete(job),120)
+        self.assertEqual(self.app.schedule_retry('job',ConnectionError()),240)
+        self.assertIsNone(self.app.schedule_incomplete(job))
+        self.assertIsNone(self.app.schedule_incomplete(job))
+        self.assertEqual(tuple(self.app.store.db.execute('select attempts,next_at from retry_schedule').fetchone()),(4,0))
+
+    async def test_short_delivery_refuses_unsafe_replays(self):
+        self.app.store.update('job','needs_review',3)
+        for extra in ({'expected':None},{'expected':0},{'dedup_audit':True},
+                      {'audit_unmatched':True},{'overflow':True}):
+            self.assertIsNone(self.app.schedule_incomplete(dict(id='job',expected=3)|extra))
+        self.app.blocked=True
+        self.assertIsNone(self.app.schedule_incomplete(dict(id='job',expected=3)))
+        self.app.blocked=False
+        self.app.transfer_mode='forward'
+        self.assertIsNone(self.app.schedule_incomplete(dict(id='job',expected=3)))
+        self.app.transfer_mode='download_upload'
+        self.app.store.begin_local_send('job',(1,2),'token')
+        self.assertIsNone(self.app.schedule_incomplete(dict(id='job',expected=3)))
+        self.assertEqual(self.app.store.db.execute('select count(*) from retry_schedule').fetchone()[0],0)
+
+    async def test_short_delivery_does_not_retry_complete_or_excess_count(self):
+        self.app.store.update('job','complete',3)
+        self.assertIsNone(self.app.schedule_incomplete(dict(id='job',expected=3)))
+        self.app.store.update('job','needs_review',3)
+        for count in (3,4):
+            with patch.object(self.app.store,'processed_count',return_value=count):
+                self.assertIsNone(self.app.schedule_incomplete(dict(id='job',expected=3)))
+
+    async def test_due_short_delivery_queues_once_without_resetting_budget(self):
+        self.app.store.update('job','needs_review',3)
+        self.app.schedule_incomplete(dict(id='job',expected=3))
+        with self.app.store.db:
+            self.app.store.db.execute('update retry_schedule set next_at=1')
+        with patch('operations.asyncio.sleep',new=AsyncMock(side_effect=[None,asyncio.CancelledError()])):
+            with self.assertRaises(asyncio.CancelledError):await self.app.retry_loop()
+        self.assertEqual(self.app.jobs.qsize(),1)
+        self.assertEqual(self.app.store.get('job')['state'],'queued')
+        self.assertEqual(tuple(self.app.store.db.execute('select attempts,next_at from retry_schedule').fetchone()),(1,0))
+
     async def test_controls_survive_restart_and_panel_reports_them(self):
         control.toggle(self.root,'collector')
         control.toggle(self.root,'transfers')

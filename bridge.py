@@ -32,7 +32,7 @@ from delivery import WholeDelivery
 from capture_backfill import CaptureBackfill
 import automation_control
 
-VERSION = '0.9.0'
+VERSION = '0.9.1'
 
 
 class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill):
@@ -853,6 +853,19 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill):
                 self.store.update(job_id, 'complete' if complete else 'needs_review', job['expected'], detail)
                 if complete:
                     self.store.finish_audit(job_id)
+                    with self.store.db:
+                        self.store.db.execute('UPDATE retry_schedule SET next_at=0 WHERE job=?',(job_id,))
+                else:
+                    retry_wait = self.schedule_incomplete(job)
+                    if retry_wait:
+                        attempt = self.store.db.execute('SELECT attempts FROM retry_schedule WHERE job=?',
+                                                        (job_id,)).fetchone()[0]
+                        detail += (f' 已处理 {n}/{job["expected"]}；约 {retry_wait} 秒后自动排队补收'
+                                   f'（第 {attempt}/3 次），已保存文件会跳过。')
+                    elif self.store.db.execute('SELECT 1 FROM retry_schedule WHERE job=? AND attempts>=4',
+                                               (job_id,)).fetchone():
+                        detail += ' 自动恢复次数已用尽，请管理员检查来源后手动续传。'
+                    self.store.update(job_id, 'needs_review', job['expected'], detail)
             except asyncio.CancelledError:
                 self.store.update(job_id, 'interrupted', job['expected'])
                 raise

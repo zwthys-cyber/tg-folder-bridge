@@ -723,6 +723,28 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
             await worker
         self.assertEqual(self.bridge.store.get('job')['expected'], 63)
 
+    async def test_silent_short_delivery_schedules_recovery_and_completion_cancels_it(self):
+        self.bridge.transfer_mode='download_upload'
+        self.bridge.store.update('job','partial',3)
+        self.bridge.collect=AsyncMock()
+        self.bridge.app=NS(bot=NS(send_message=AsyncMock()))
+        self.bridge.jobs.put_nowait('job')
+        worker=asyncio.create_task(self.bridge.work())
+        try:
+            await asyncio.wait_for(self.bridge.jobs.join(),2)
+            row=self.bridge.store.get('job')
+            self.assertEqual(row['state'],'needs_review')
+            self.assertIn('自动排队补收',row['detail'])
+            self.assertEqual(self.bridge.store.db.execute('select attempts from retry_schedule').fetchone()[0],1)
+            with patch.object(self.bridge.store,'processed_count',return_value=3):
+                self.bridge.jobs.put_nowait('job')
+                await asyncio.wait_for(self.bridge.jobs.join(),2)
+            self.assertEqual(self.bridge.store.get('job')['state'],'complete')
+            self.assertEqual(self.bridge.store.db.execute('select next_at from retry_schedule').fetchone()[0],0)
+        finally:
+            worker.cancel()
+            with self.assertRaises(asyncio.CancelledError):await worker
+
     async def test_cooling_job_cannot_be_queued_again(self):
         self.bridge.store.update('job', 'cooldown', 63)
         update = NS(effective_chat=NS(type='private'), effective_user=NS(id=7),

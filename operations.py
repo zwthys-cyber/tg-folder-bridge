@@ -142,8 +142,28 @@ class Operations:
         if (self.transfer_mode != 'download_upload' or type(error).__name__ not in TRANSIENT
                 or self.store.unknown_local_send(job_id)):
             return
+        return self.schedule_attempt(job_id)
+
+    def schedule_incomplete(self, job):
+        """Retry a known short source delivery, never an ambiguous upload or audit."""
+        job_id = job['id']
+        expected = job.get('expected')
+        if (self.transfer_mode != 'download_upload' or self.blocked
+                or not isinstance(expected, int) or expected <= 0
+                or job.get('dedup_audit') or job.get('audit_unmatched') or job.get('overflow')
+                or self.store.unknown_local_send(job_id)):
+            return
+        row = self.store.get(job_id)
+        if (not row or row['owner'] not in self.owners or row['state'] != 'needs_review'
+                or self.completed_duplicate(row)
+                or self.store.processed_count(job_id) >= expected):
+            return
+        return self.schedule_attempt(job_id)
+
+    def schedule_attempt(self, job_id):
+        # Network failures and short source deliveries share one persistent budget.
         row = self.store.db.execute('SELECT attempts FROM retry_schedule WHERE job=?',(job_id,)).fetchone()
-        attempts = (row[0] if row else 0) + 1
+        attempts = min(4, (row[0] if row else 0) + 1)
         next_at = time.time() + 60 * 2**(attempts-1) if attempts <= 3 else 0
         with self.store.db:
             self.store.db.execute('INSERT OR REPLACE INTO retry_schedule VALUES(?,?,?)',(job_id,attempts,next_at))
