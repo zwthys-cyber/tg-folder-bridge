@@ -11,7 +11,7 @@ class Catalog(unittest.IsolatedAsyncioTestCase):
         self.assertIn('共 12 个文件夹', text)
         self.assertIn('文件夹11（12 个文件）', text)
         self.assertEqual(keyboard.inline_keyboard[0][0].callback_data, 'bridge_open:job11:1')
-        self.assertEqual(keyboard.inline_keyboard[-1][0].callback_data, 'bridge_catalog:2')
+        self.assertEqual(keyboard.inline_keyboard[-1][-1].callback_data, 'bridge_catalog:2')
         text, keyboard = catalog_page(rows, 2)
         self.assertIn('1. 📁 文件夹1', text)
         self.assertEqual(keyboard.inline_keyboard[0][0].text, '1')
@@ -20,7 +20,7 @@ class Catalog(unittest.IsolatedAsyncioTestCase):
         rows += [dict(id=f'extra{i}', title=f'额外{i}', file_count=1) for i in range(10)]
         _, keyboard = catalog_page(rows, 2)
         self.assertEqual([b.callback_data for b in keyboard.inline_keyboard[-1]],
-                         ['bridge_catalog:1', 'bridge_catalog:3'])
+                         ['bridge_catalog:1', 'bridge_jump:bridge_catalog', 'bridge_catalog:3'])
 
     async def test_folder_number_sort_is_numeric_stable_and_shared_with_favorites(self):
         numbers=[1045,1046,1048,1049,1050,1051,1047]

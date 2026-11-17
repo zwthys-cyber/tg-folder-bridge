@@ -1,0 +1,10 @@
+[Unit]
+Description=Private Telegram bot metadata backup
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/tg-folder-bridge
+ExecStart=/root/sougabot/.venv/bin/python /root/tg-folder-bridge/backup_metadata.py --bot-dir /root/sougabot
+UMask=0077
+NoNewPrivileges=true
+TimeoutStartSec=5min

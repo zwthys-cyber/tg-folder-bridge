@@ -34,6 +34,11 @@ class ViewProgress:
             'SELECT source_chat,source_message FROM view_receipts WHERE session=?',(self.id,)))
         return sum((x['source_chat'],x['source_message']) in received for x in items)
 
+    def bookmark(self, page):
+        with self.store.db:
+            self.store.db.execute('INSERT OR REPLACE INTO bookmarks VALUES(?,?,?,?)',
+                                  (self.owner, self.job, page, self.id))
+
 
 def parse_link(url, allowed):
     p = urlparse(url.strip())
@@ -111,6 +116,12 @@ class Store:
             CREATE TABLE IF NOT EXISTS view_sessions (
                 id TEXT PRIMARY KEY, owner INTEGER, job TEXT,
                 detail_sent INTEGER DEFAULT 0, sent_messages INTEGER DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS bookmarks (
+                owner INTEGER, job TEXT, page INTEGER, session TEXT, PRIMARY KEY(owner,job)
+            );
+            CREATE TABLE IF NOT EXISTS retry_schedule (
+                job TEXT PRIMARY KEY, attempts INTEGER DEFAULT 0, next_at REAL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS view_receipts (
                 session TEXT, source_chat INTEGER, source_message INTEGER,
@@ -324,6 +335,10 @@ class Store:
     def view(self, sid, owner):
         row=self.db.execute('SELECT * FROM view_sessions WHERE id=? AND owner=?', (sid,owner)).fetchone()
         return ViewProgress(self,dict(row)) if row else None
+
+    def bookmark(self, owner, job):
+        row = self.db.execute('SELECT * FROM bookmarks WHERE owner=? AND job=?', (owner,job)).fetchone()
+        return dict(row) if row else None
 
     def processed_count(self, job):
         return len(self.files(job)) + self.db.execute('SELECT count(*) FROM file_aliases WHERE job=?', (job,)).fetchone()[0]

@@ -43,9 +43,10 @@ def share_link(message, allowed):
 
 
 class Catalog:
-    def __init__(self, client, source, allowed, delay=1.5, timeout=30):
+    def __init__(self, client, source, allowed, delay=1.5, timeout=30, should_pause=None):
         self.client, self.source, self.allowed = client, source, allowed
         self.delay, self.timeout = delay, timeout
+        self.should_pause = should_pause
 
     async def find_panel(self):
         for message in await self.client.get_messages(self.source, limit=200):
@@ -104,6 +105,8 @@ class Catalog:
         page, total, numbers = list_page(message)
         # Snapshot callbacks; return to this same page before each subsequent number.
         for number in numbers:
+            if self.should_pause and self.should_pause():
+                return False
             key = bytes(number.data).hex()
             if ledger.seen(self.source, key):
                 continue

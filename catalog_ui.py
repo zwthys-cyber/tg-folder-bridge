@@ -36,6 +36,8 @@ def catalog_page(rows, page=1, page_callback_prefix='bridge_catalog', favorites=
     navigation = []
     if page > 1:
         navigation.append(InlineKeyboardButton('⬅️ 上一页', callback_data=f'{page_callback_prefix}:{page-1}'))
+    if pages > 1:
+        navigation.append(InlineKeyboardButton(f'📍 {page}/{pages} 跳转', callback_data=f'bridge_jump:{page_callback_prefix}'))
     if page < pages:
         navigation.append(InlineKeyboardButton('下一页 ➡️', callback_data=f'{page_callback_prefix}:{page+1}'))
     if navigation:
@@ -79,11 +81,16 @@ def favorite_button(job, saved=False):
         callback_data=f"{'bridge_unfav' if saved else 'bridge_fav'}:{job['id']}")
 
 
-async def send_folder_card(bot, chat, job, items, photo=None, favorite=False):
-    keyboard = InlineKeyboardMarkup([
+async def send_folder_card(bot, chat, job, items, photo=None, favorite=False, bookmark=None):
+    rows = [
         [InlineKeyboardButton('查看内容', callback_data=f"bridge_view:{job['id']}:1")],
         [favorite_button(job,favorite),InlineKeyboardButton('⭐ 我的收藏',callback_data='bridge_favorites:1')],
-        [InlineKeyboardButton('文件夹列表', callback_data='bridge_catalog:1')]])
+        [InlineKeyboardButton('文件夹列表', callback_data='bridge_catalog:1')]]
+    if bookmark:
+        page = min(max(1, bookmark['page'] + 1), len(file_pages(items)))
+        rows.insert(1, [InlineKeyboardButton(f'▶️ 继续浏览（第 {page} 组）',
+                        callback_data=f"bridge_page:{bookmark['session']}:{page}")])
+    keyboard = InlineKeyboardMarkup(rows)
     text = folder_details(job, items, starting=False)
     if photo:
         return await bot.send_photo(chat_id=chat, photo=photo, caption=text,
@@ -160,3 +167,5 @@ async def send_file_page(bot, chat, job, items, page, send_one, progress=None, f
             text = f'✅ 当前组发送完成\n\n已发送 {received} / {len(items)} 个文件\n共发送 {progress.message_count} 条消息'
     await bot.send_message(chat, text,
                            reply_markup=InlineKeyboardMarkup(keyboard))
+    if progress is not None:
+        progress.bookmark(page)

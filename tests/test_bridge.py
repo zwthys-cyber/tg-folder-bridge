@@ -461,7 +461,7 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         bot = NS(set_my_commands=AsyncMock())
         await self.bridge.update_menu(bot)
         calls = bot.set_my_commands.call_args_list
-        self.assertEqual([x.command for x in calls[0].args[0]], ['start', 'favorites', 'help'])
+        self.assertEqual([x.command for x in calls[0].args[0]], ['start', 'page', 'favorites', 'help'])
         self.assertIn('fetch', [x.command for x in calls[-1].args[0]])
 
     async def test_next_group_reuses_button_and_message_id_without_repeat_clicks(self):

@@ -26,11 +26,14 @@ from bot_api_config import endpoint, LOCAL
 from local_upload import eligible, send_local, DeliveryUnknownError
 from content_identity import analyze, preference
 from source_lock import source_lease
+from operations import Operations
+from browse_navigation import BrowseNavigation
+import automation_control
 
-VERSION = '0.6.0'
+VERSION = '0.7.0'
 
 
-class Bridge:
+class Bridge(Operations, BrowseNavigation):
     def __init__(self):
         self.owners = {int(x) for x in os.environ['OWNER_IDS'].split(',') if x.strip()}
         self.relay_id = int(os.environ['RELAY_USER_ID'])
@@ -94,6 +97,8 @@ class Bridge:
         self.worker = None
         self.recovery_worker = None
         self.search_sessions = {}
+        self.pending_jumps = {}
+        self.retry_worker = None
 
     def install(self, app):
         # Negative group runs before ordinary existing bot handlers. Reserve -100.
@@ -103,6 +108,10 @@ class Bridge:
         app.add_handler(CommandHandler('start', self.start_command), group=-100)
         app.add_handler(CommandHandler('favorites', self.favorites_command), group=-100)
         app.add_handler(CommandHandler('help', self.help_command), group=-100)
+        app.add_handler(CommandHandler('admin', self.admin_command), group=-100)
+        app.add_handler(CommandHandler('failures', self.failures_command), group=-100)
+        app.add_handler(CommandHandler('page', self.page_command), group=-100)
+        app.add_handler(CommandHandler('cancel', self.cancel_jump), group=-100)
         app.add_handler(CommandHandler('folder', self.folder), group=-100)
         app.add_handler(CommandHandler('folders', self.folders), group=-100)
         app.add_handler(CommandHandler('status', self.status), group=-100)
@@ -113,6 +122,8 @@ class Bridge:
         app.add_handler(CommandHandler('resolve', self.resolve_delivery), group=-100)
         app.add_handler(CommandHandler('dedup', self.dedup), group=-100)
         app.add_handler(CallbackQueryHandler(self.original, pattern=r'^bridge_original:'), group=-100)
+        app.add_handler(CallbackQueryHandler(self.admin_callback, pattern=r'^bridge_admin:'), group=-100)
+        app.add_handler(CallbackQueryHandler(self.jump_callback, pattern=r'^bridge_jump:'), group=-100)
         app.add_handler(CallbackQueryHandler(self.catalog_callback, pattern=r'^bridge_(catalog|open|view|page|search|fav|unfav|favorites):'), group=-100)
         app.add_handler(MessageHandler(filters.Regex(r'^https://t\.me/\w+\?start='),
                                        self.fetch), group=-100)
@@ -142,6 +153,7 @@ class Bridge:
         self.worker = asyncio.create_task(self.work())
         self.resume_after_upgrade()
         self.recovery_worker = asyncio.create_task(self.restore_jobs())
+        self.retry_worker = asyncio.create_task(self.retry_loop())
 
     async def restore_jobs(self):
         if not self.auto_resume or self.transfer_mode != 'download_upload':
@@ -198,6 +210,7 @@ class Bridge:
 
     async def update_menu(self, bot):
         public = [BotCommand('start', '资源统计与文件夹列表'),
+                  BotCommand('page', '跳到指定目录页'),
                   BotCommand('favorites', '我的收藏'),
                   BotCommand('help', '使用帮助')]
         await bot.set_my_commands(public)
@@ -205,6 +218,7 @@ class Bridge:
         for owner in self.owners:
             try:
                 await bot.set_my_commands(public + [BotCommand('fetch', '导入分享文件夹'),
+                    BotCommand('admin', '管理员控制面板'), BotCommand('failures', '失败任务与续传'),
                     BotCommand('folders', '查看导入任务'), BotCommand('status', '查看传输进度'),
                     BotCommand('resume', '继续导入任务'), BotCommand('add', '收录搜索资源'),
                     BotCommand('speed', '调整上传下载并发'),
@@ -233,9 +247,9 @@ class Bridge:
     async def help_command(self, update, context):
         if update.effective_chat.type != 'private':
             raise ApplicationHandlerStop
-        text = '发送 /start 查看文件夹列表，点击编号打开文件夹。\n文件按组显示缩略图、文件名和大小。\n发送 /favorites 查看我的收藏。\n直接发送关键词搜索文件夹名称，也可搜索原收录资源。'
+        text = '发送 /start 查看文件夹列表，点击编号打开文件夹。\n文件按组显示缩略图、文件名和大小，重新打开可继续浏览。\n/page 页码 跳转目录；也可点击列表中的跳转按钮。\n发送 /favorites 查看我的收藏。\n直接发送关键词搜索文件夹名称，也可搜索原收录资源。'
         if update.effective_user.id in self.owners:
-            text += '\n\n管理员：\n/fetch 分享链接\n/folders 导入任务\n/status 任务编号\n/resume 任务编号\n/speed 下载并发 上传并发\n/add 标题 | 链接 | 关键词\n/delete 编号'
+            text += '\n\n管理员：\n/admin 控制面板\n/failures 失败任务\n/fetch 分享链接\n/folders 导入任务\n/status 任务编号\n/resume 任务编号\n/speed 下载并发 上传并发\n/add 标题 | 链接 | 关键词\n/delete 编号'
         await update.message.reply_text(text)
         raise ApplicationHandlerStop
 
@@ -263,6 +277,8 @@ class Bridge:
 
     async def search_command(self, update, context):
         text = (update.message.text or '').strip()
+        if await self.handle_jump_reply(update, context, text):
+            raise ApplicationHandlerStop
         if update.effective_chat.type == 'private' and 0 < len(text) <= 100:
             if await self.search_text(update.effective_chat.id, update.effective_user.id, text):
                 raise ApplicationHandlerStop
@@ -365,11 +381,16 @@ class Bridge:
             except Exception as exc:
                 print('文件夹封面暂不可用：' + type(exc).__name__, flush=True)
         reply = await send_folder_card(bot, chat, job, items, photo,
-                                       favorite=self.store.is_favorite(chat,job['id']))
+                                       favorite=self.store.is_favorite(chat,job['id']),
+                                       bookmark=self.store.bookmark(chat,job['id']))
         if photo and getattr(reply, 'photo', None):
             self.store.set_cover(job['id'], reply.photo[-1].file_id)
 
     async def stop(self, app):
+        if self.retry_worker:
+            self.retry_worker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self.retry_worker
         if self.recovery_worker:
             self.recovery_worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -776,6 +797,8 @@ class Bridge:
     async def work(self):
         while True:
             job_id = await self.jobs.get()
+            while automation_control.paused(self.controls_root(),'transfers'):
+                await asyncio.sleep(1)
             if self.blocked:
                 self.store.update(job_id, 'blocked', detail='前一任务收件未确认，请重启后重新提交。')
                 self.jobs.task_done()
@@ -828,6 +851,10 @@ class Bridge:
                     detail += f'；连接冷却还剩约 {self.cooldown.remaining():.0f} 秒，续传会等待冷却。'
                 self.store.update(job_id, 'partial' if self.store.files(job_id) else 'failed',
                                   job['expected'], detail)
+                retry_wait = self.schedule_retry(job_id, exc)
+                if retry_wait:
+                    self.store.update(job_id, 'partial' if self.store.files(job_id) else 'failed',
+                                      job['expected'], detail + f'；约 {retry_wait} 秒后自动排队重试（最多 3 次）。')
             finally:
                 self.pending = None
                 self.active = None

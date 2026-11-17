@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import csv
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -14,6 +15,7 @@ from telethon.sessions import MemorySession
 from collector_state import ACTIVE, Ledger, existing_jobs
 from source_catalog import Catalog
 from source_lock import source_lease
+import automation_control as control
 
 
 async def connect(config, root):
@@ -37,7 +39,7 @@ async def connect(config, root):
 
 
 def safe_to_dispatch(index, rows, root):
-    if any(r['state'] in ACTIVE for r in rows):
+    if control.paused(root,'transfers') or any(r['state'] in ACTIVE or r.get('restart_pending') for r in rows):
         return False
     with contextlib.closing(sqlite3.connect(index.resolve().as_uri() + '?mode=ro', uri=True)) as db:
         if db.execute("SELECT 1 FROM local_send_intents WHERE state IN ('pending','unknown') LIMIT 1").fetchone():
@@ -92,7 +94,8 @@ async def operate(args, config, root, ledger):
     async with source_lease(root / 'collector-process.lock'):
         client, owner = await connect(config, root)
         try:
-            catalog = Catalog(client, args.source, allowed)
+            catalog = Catalog(client, args.source, allowed,
+                              should_pause=lambda: control.paused(root,'collector'))
             if args.command == 'scan':
                 for _ in range(args.pages):
                     async with source_lease(root / 'source-control.lock'):
@@ -106,16 +109,17 @@ async def operate(args, config, root, ledger):
                 raise ValueError('目标必须是自己的转存机器人，不能是来源机器人。')
             while True:
                 try:
+                    control.write(root, {'at': time.time(), 'pid': os.getpid()}, name='collector-heartbeat.json')
                     rows, jobs = existing_jobs(root / 'index.sqlite3', owner, allowed)
                     ledger.reconcile(jobs)
                     if safe_to_dispatch(root / 'index.sqlite3', rows, root):
-                        if ledger.head_due(args.source):
+                        if not control.paused(root,'collector') and ledger.head_due(args.source):
                             async with source_lease(root / 'source-control.lock'):
                                 await catalog.scan_page(ledger, head=True)
                             _, jobs = existing_jobs(root / 'index.sqlite3', owner, allowed)
                             ledger.reconcile(jobs)
                         ready = ledger.db.execute("SELECT 1 FROM items WHERE state='ready' LIMIT 1").fetchone()
-                        if not ready:
+                        if not ready and not control.paused(root,'collector'):
                             async with source_lease(root / 'source-control.lock'):
                                 await catalog.scan_page(ledger)
                             _, jobs = existing_jobs(root / 'index.sqlite3', owner, allowed)
