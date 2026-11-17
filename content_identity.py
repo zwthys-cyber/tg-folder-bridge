@@ -46,16 +46,16 @@ async def analyze(path, native=False):
     result = dict(content_sha256=await asyncio.to_thread(raw_digest, path),
                   stream_sha256='', quality=dict(native_source=bool(native), has_location=False,
                                                  metadata_available=False,capture_checked=True))
-    from capture_time import IMAGES,photo_date,from_probe
+    from capture_time import IMAGES,inspect
     if path.suffix.lower() in IMAGES:
-        result['quality'].update(await asyncio.to_thread(photo_date,path))
+        result['quality'].update(await inspect(path))
     probe = shutil.which('ffprobe')
     if path.suffix.lower() not in VIDEO_EXTENSIONS or not probe:
         return result
     try:
         info = json.loads(await capture([probe, '-v', 'error', '-show_streams', '-show_format',
                                         '-show_data_hash', 'sha256', '-of', 'json', str(path)], timeout=30))
-        result['quality'].update(from_probe(info))
+        result['quality'].update(await inspect(path,probe_info=info))
         streams = [s for s in info.get('streams', []) if s.get('codec_type') in {'video', 'audio'}]
         video = next((s for s in streams if s.get('codec_type') == 'video'), None)
         if not video:

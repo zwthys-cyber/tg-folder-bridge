@@ -106,7 +106,19 @@ class Store:
     def __init__(self, path):
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
+        had_notices=self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='notice_events'").fetchone()
         self.db.executescript('''
+            CREATE TABLE IF NOT EXISTS capture_priorities (job TEXT PRIMARY KEY,touched REAL);
+            CREATE TABLE IF NOT EXISTS subscribers (
+                owner INTEGER PRIMARY KEY, enabled INTEGER DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS notice_events (
+                job TEXT PRIMARY KEY, published_at REAL
+            );
+            CREATE TABLE IF NOT EXISTS notice_queue (
+                job TEXT, owner INTEGER, state TEXT, next_at REAL DEFAULT 0,
+                attempts INTEGER DEFAULT 0, error TEXT DEFAULT '', PRIMARY KEY(job,owner)
+            );
             CREATE TABLE IF NOT EXISTS retired_menus (
                 chat INTEGER, message INTEGER, PRIMARY KEY(chat,message)
             );
@@ -181,7 +193,9 @@ class Store:
             if column not in columns:
                 self.db.execute(f'ALTER TABLE files ADD COLUMN {column} TEXT DEFAULT {default}')
         for column,definition in (('captured_at',"TEXT DEFAULT ''"),('capture_time_source',"TEXT DEFAULT ''"),
-                                  ('capture_checked','INTEGER DEFAULT 0')):
+                                  ('capture_checked','INTEGER DEFAULT 0'),
+                                  ('capture_version','INTEGER DEFAULT 0'),
+                                  ('capture_timezone_assumed','INTEGER DEFAULT 1')):
             if column not in columns:self.db.execute(f'ALTER TABLE files ADD COLUMN {column} {definition}')
         job_columns = {x['name'] for x in self.db.execute('PRAGMA table_info(jobs)')}
         if 'title' not in job_columns:
@@ -194,6 +208,9 @@ class Store:
         for column in ('source_created_at', 'source_updated_at', 'cover_file_id'):
             if column not in job_columns:
                 self.db.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT DEFAULT ''")
+        if not had_notices:
+            # Enabling the feature must never broadcast the whole existing catalog.
+            self.db.execute("INSERT OR IGNORE INTO notice_events SELECT id,0 FROM jobs WHERE state='complete' OR audit_public=1")
         self.db.execute("UPDATE jobs SET restart_pending=1 WHERE state IN ('running','queued','cooldown')")
         self.recoverable_jobs = [row['id'] for row in self.db.execute(
             "SELECT id FROM jobs WHERE restart_pending=1 AND state IN "
@@ -402,12 +419,15 @@ class Store:
             self.set_capture_time(job,source,analysis['quality'])
 
     def set_capture_time(self,job,source,result):
+        from capture_time import VERSION,choose_time
+        old=self.db.execute('SELECT captured_at,capture_time_source,capture_timezone_assumed FROM files '
+                            'WHERE job=? AND source_chat=? AND source_message=?',(job,*source)).fetchone()
+        selected=choose_time(result,dict(old) if old else {})
         with self.db:
-            self.db.execute("UPDATE files SET captured_at=CASE WHEN ?<>'' THEN ? ELSE captured_at END, "
-                "capture_time_source=CASE WHEN ?<>'' THEN ? ELSE capture_time_source END,capture_checked=1 "
-                'WHERE job=? AND source_chat=? AND source_message=?',
-                (result.get('captured_at',''),result.get('captured_at',''),result.get('captured_at',''),
-                 result.get('capture_time_source',''),job,*source))
+            self.db.execute('UPDATE files SET captured_at=?,capture_time_source=?,capture_timezone_assumed=?, '
+                'capture_checked=1,capture_version=? WHERE job=? AND source_chat=? AND source_message=?',
+                (selected.get('captured_at',''),selected.get('capture_time_source',''),
+                 int(bool(selected.get('capture_timezone_assumed',True))),VERSION,job,*source))
 
     def duplicate(self, job, source, analysis):
         row = self.db.execute('SELECT * FROM files WHERE job=? AND NOT (source_chat=? AND source_message=?) '

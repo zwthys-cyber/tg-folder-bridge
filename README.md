@@ -1,6 +1,6 @@
 # Telegram 文件夹转存机器人
 
-当前说明对应 **Bridge 0.9.2**。通过专用 Telegram 用户账号读取允许访问的分享，将原文件保存到自己的机器人，再用自己的 `file_id` 提供浏览、取回和收藏。Python 3.11–3.13；依赖以 [requirements.txt](requirements.txt) 为准。
+当前说明对应 **Bridge 0.10.0**。通过专用 Telegram 用户账号读取允许访问的分享，将原文件保存到自己的机器人，再用自己的 `file_id` 提供浏览、取回和收藏。Python 3.11–3.13；依赖以 [requirements.txt](requirements.txt) 为准。
 
 ## 用户界面
 
@@ -92,3 +92,5 @@
 ## 按拍摄日期发送
 
 0.9.0 新增照片 EXIF/视频内嵌日期识别：先原文件、后原生视频，各类内部按拍摄日期从新到旧；没有日期的文件按来源顺序置于同类末尾。新导入直接读已有临时原件，历史索引在导入空闲时以有界取样渐进补齐，不重传原文件。时区、时间来源和未知日期的处理见 [CAPTURE_TIME.md](CAPTURE_TIME.md)。
+
+0.10.0 增加 ExifTool 原始拍摄日期识别，普通创建时间不再参与拍摄日期排序，旧文件在持续导入的文件间隙也会定额补读。新增默认关闭的更新通知，用户通过 `/subscribe`、`/unsubscribe` 或 `/notifications` 主动管理；新文件夹首次完成后通知已订阅用户，不补发历史目录。见 [拍摄日期](CAPTURE_TIME.md) 和 [更新通知](NOTIFICATIONS.md)。

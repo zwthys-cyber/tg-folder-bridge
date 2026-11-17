@@ -27,7 +27,7 @@ def reset(root, apply=False):
         with sqlite3.connect(backup_path) as backup:
             db.backup(backup)
         with db:
-            for table in ('source_plans', 'deliveries', 'bookmarks', 'retry_schedule', 'catalog_panels', 'view_receipts', 'view_sessions', 'favorites', 'source_entries', 'file_aliases', 'local_send_intents', 'transfer_metrics'):
+            for table in ('capture_priorities','notice_queue','notice_events','source_plans', 'deliveries', 'bookmarks', 'retry_schedule', 'catalog_panels', 'view_receipts', 'view_sessions', 'favorites', 'source_entries', 'file_aliases', 'local_send_intents', 'transfer_metrics'):
                 if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
                     db.execute('DELETE FROM '+table)
             db.execute('DELETE FROM files')

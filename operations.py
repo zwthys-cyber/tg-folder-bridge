@@ -65,8 +65,18 @@ class Operations:
         deliveries=dict(self.store.db.execute('SELECT state,count(*) FROM deliveries GROUP BY state'))
         lines.append(f"用户内容发送：排队 {deliveries.get('queued',0)}，运行 {deliveries.get('running',0)}，"
                      f"停止 {deliveries.get('paused',0)}，待确认 {deliveries.get('uncertain',0)}")
-        dates=self.store.db.execute("SELECT count(*),sum(captured_at<>''),sum(capture_checked=0) FROM files").fetchone()
-        lines.append(f'拍摄时间：已识别 {dates[1] or 0} / {dates[0]}，待补读 {dates[2] or 0}')
+        from capture_time import original_source,VERSION
+        dates=self.store.db.execute('SELECT captured_at,capture_time_source FROM files').fetchall()
+        original=sum(bool(r[0]) and original_source(r[1]) for r in dates)
+        creation=sum(bool(r[0]) and not original_source(r[1]) for r in dates)
+        pending=self.store.db.execute("SELECT count(*) FROM files WHERE capture_version<? AND job IN "
+            "(SELECT id FROM jobs WHERE state='complete' OR audit_public=1)",(VERSION,)).fetchone()[0]
+        lines.append(f'拍摄时间：原始日期 {original}，仅创建时间 {creation}，未知 {len(dates)-original-creation}；待补读 {pending}')
+        lines.append('完整元数据引擎：'+('ExifTool 已启用' if shutil.which('exiftool') else 'ExifTool 未安装（使用兼容读取）'))
+        subscribers=self.store.db.execute('SELECT count(*) FROM subscribers WHERE enabled=1').fetchone()[0]
+        notices=dict(self.store.db.execute('SELECT state,count(*) FROM notice_queue GROUP BY state'))
+        lines.append(f"更新通知：订阅 {subscribers} 人，待发送 {notices.get('queued',0)}，已发送 {notices.get('sent',0)}，"
+                     f"待确认 {notices.get('unknown',0)}，失败 {notices.get('failed',0)}")
         collector = root / 'collector.sqlite3'
         heartbeat = root / 'collector-heartbeat.json'
         if heartbeat.exists():

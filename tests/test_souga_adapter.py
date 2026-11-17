@@ -18,7 +18,7 @@ def raw_message(text='', user=7, **media):
 
 class Routing(unittest.TestCase):
     def test_commands_and_share_link_are_routed(self):
-        for text in ('/start', '/favorites', '/help', '/admin', '/failures', '/page 2', '/cancel', '/speed 32 32', '/transport 2', '/diagnostics', '/fetch https://t.me/epan?start=x', '/folders', '/folder id 2', '/status id', '/resume id',
+        for text in ('/start', '/favorites', '/help', '/notifications','/subscribe','/unsubscribe','/admin', '/failures', '/page 2', '/cancel', '/speed 32 32', '/transport 2', '/diagnostics', '/fetch https://t.me/epan?start=x', '/folders', '/folder id 2', '/status id', '/resume id',
                      'https://t.me/epan?start=x'):
             self.assertTrue(is_bridge_update(raw_message(text), 7))
 
@@ -35,7 +35,7 @@ class Routing(unittest.TestCase):
         self.assertTrue(is_bridge_update(query, 7))
         for data in ('bridge_page:session:2','bridge_fav:job','bridge_unfav:job','bridge_favorites:1',
                      'bridge_jump:bridge_catalog','bridge_jump:bridge_search:token','bridge_admin:panel','bridge_admin:transfers',
-                     'bridge_delivery:session:stop','bridge_delivery:session:resume'):
+                     'bridge_delivery:session:stop','bridge_delivery:session:resume','bridge_notice:on','bridge_notice:off'):
             query['callback_query']['data']=data
             self.assertTrue(is_bridge_update(query,7))
         query['callback_query']['data'] = 'searchkey:5'

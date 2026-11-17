@@ -31,12 +31,13 @@ from operations import Operations
 from browse_navigation import BrowseNavigation
 from delivery import WholeDelivery
 from capture_backfill import CaptureBackfill
+from notifications import Notifications
 import automation_control
 
-VERSION = '0.9.2'
+VERSION = '0.10.0'
 
 
-class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill):
+class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill, Notifications):
     def __init__(self):
         self.owners = {int(x) for x in os.environ['OWNER_IDS'].split(',') if x.strip()}
         self.relay_id = int(os.environ['RELAY_USER_ID'])
@@ -104,6 +105,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill):
         self.retry_worker = None
         self.delivery_worker = None
         self.capture_worker = None
+        self.notice_worker = None
 
     def install(self, app):
         # Negative group runs before ordinary existing bot handlers. Reserve -100.
@@ -112,6 +114,9 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill):
         app.add_handler(CommandHandler('fetch', self.fetch), group=-100)
         app.add_handler(CommandHandler('start', self.start_command), group=-100)
         app.add_handler(CommandHandler('favorites', self.favorites_command), group=-100)
+        for command in ('notifications','subscribe','unsubscribe'):
+            app.add_handler(CommandHandler(command,self.notifications_command),group=-100)
+        app.add_handler(CallbackQueryHandler(self.notice_callback,pattern=r'^bridge_notice:'),group=-100)
         app.add_handler(CommandHandler('help', self.help_command), group=-100)
         app.add_handler(CommandHandler('admin', self.admin_command), group=-100)
         app.add_handler(CommandHandler('failures', self.failures_command), group=-100)
@@ -162,6 +167,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill):
         self.retry_worker = asyncio.create_task(self.retry_loop())
         self.delivery_worker = asyncio.create_task(self.delivery_loop())
         self.capture_worker = asyncio.create_task(self.capture_loop())
+        self.notice_worker = asyncio.create_task(self.notice_loop())
 
     async def restore_jobs(self):
         if not self.auto_resume or self.transfer_mode != 'download_upload':
@@ -220,6 +226,9 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill):
         public = [BotCommand('start', '资源统计与文件夹列表'),
                   BotCommand('page', '跳到指定目录页'),
                   BotCommand('favorites', '我的收藏'),
+                  BotCommand('notifications','新文件夹通知设置'),
+                  BotCommand('subscribe','订阅新文件夹通知'),
+                  BotCommand('unsubscribe','取消新文件夹通知'),
                   BotCommand('help', '使用帮助')]
         await bot.set_my_commands(public)
         await bot.set_my_commands(public, scope=BotCommandScopeAllPrivateChats())
@@ -256,6 +265,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill):
         if update.effective_chat.type != 'private':
             raise ApplicationHandlerStop
         text = '发送 /start 查看文件夹列表，点击编号打开详情。\n点击“查看内容”会连续发送整个文件夹，不需点击下一组。\n/page 页码 跳转目录；也可点击列表中的跳转按钮。\n发送 /favorites 查看我的收藏。\n直接发送关键词搜索文件夹名称，也可搜索原收录资源。'
+        text+='\n/notifications 更新通知设置；/subscribe 主动订阅；/unsubscribe 取消通知。默认不订阅。'
         if update.effective_user.id in self.owners:
             text += '\n\n管理员：\n/admin 控制面板\n/failures 失败任务\n/fetch 分享链接\n/folders 导入任务\n/status 任务编号\n/resume 任务编号\n/speed 下载并发 上传并发\n/add 标题 | 链接 | 关键词\n/delete 编号'
         await update.message.reply_text(text)
@@ -402,10 +412,16 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill):
                 print('文件夹封面暂不可用：' + type(exc).__name__, flush=True)
         reply = await send_folder_card(bot, chat, job, items, photo,
                                        favorite=self.store.is_favorite(chat,job['id']))
+        with self.store.db:
+            self.store.db.execute('INSERT OR REPLACE INTO capture_priorities VALUES(?,?)',(job['id'],time.time()))
         if photo and getattr(reply, 'photo', None):
             self.store.set_cover(job['id'], reply.photo[-1].file_id)
 
     async def stop(self, app):
+        if self.notice_worker:
+            self.notice_worker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self.notice_worker
         if self.capture_worker:
             self.capture_worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -1305,6 +1321,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill):
                     job['audit_unmatched'] = True
                     continue
                 await self.transfer_media(message, key, job)
+            await self.capture_between_files(job)
             await asyncio.sleep(self.transfer_pause)
         if job.get('dedup_audit') and any(not row.get('content_sha256') for row in self.store.files(job['id'])):
             # Existing saved rows do not prove this audit actually inspected

@@ -101,7 +101,7 @@ class WholeDelivery:
                                    reply_markup=self.delivery_keys(dict(busy)))
             return
         fields=('job','source_chat','source_message','file_id','kind','caption','source_kind','file_size','source_name',
-                'captured_at','capture_time_source')
+                'captured_at','capture_time_source','capture_timezone_assumed')
         plan=[{key:item.get(key) for key in fields} for item in display_order(self.store.files(job['id']))]
         progress=self.store.start_view(uid,job['id'])
         with self.store.db:
