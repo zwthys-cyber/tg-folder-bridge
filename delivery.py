@@ -13,13 +13,18 @@ class DeliveryPaused(Exception):
     pass
 
 
+def display_order(items):
+    """Stable display-only partition; source metadata and existing plans stay intact."""
+    return sorted(items,key=lambda x:0 if x['kind']=='document' else (2 if x['kind']=='video' else 1))
+
+
 def batches(items):
     result=[]
     for item in items:
-        family='visual' if item['kind'] in {'photo','video'} else item['kind']
-        previous=(('visual' if result[-1][0]['kind'] in {'photo','video'} else result[-1][0]['kind']) if result else None)
+        family=item['kind']
+        previous=result[-1][0]['kind'] if result else None
         if (not result or len(result[-1])>=10 or family!=previous
-                or family not in {'visual','document'}):
+                or family not in {'photo','video','document'}):
             result.append([])
         result[-1].append(item)
     return result
@@ -90,7 +95,7 @@ class WholeDelivery:
                                    reply_markup=self.delivery_keys(dict(busy)))
             return
         fields=('job','source_chat','source_message','file_id','kind','caption','source_kind','file_size','source_name')
-        plan=[{key:item.get(key) for key in fields} for item in self.store.files(job['id'])]
+        plan=[{key:item.get(key) for key in fields} for item in display_order(self.store.files(job['id']))]
         progress=self.store.start_view(uid,job['id'])
         with self.store.db:
             self.store.db.execute('INSERT INTO deliveries(id,owner,job,origin,state,plan) VALUES(?,?,?,?,?,?)',

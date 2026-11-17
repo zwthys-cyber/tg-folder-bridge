@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 from telegram.ext import ApplicationHandlerStop
 from telegram.error import RetryAfter, Forbidden
 from core import Store
-from delivery import WholeDelivery, batches
+from delivery import WholeDelivery, batches, display_order
 
 
 class Runtime(WholeDelivery):
@@ -54,8 +54,9 @@ class WholeFolder(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum('开始发送内容' in text for text in texts),1)
         self.assertIn('✅ 文件夹内容发送完成\n\n共发送 22 条消息',texts)
         self.assertFalse(any('下一组' in text for text in texts))
-        self.assertEqual(self.bot.send_media_group.await_count,4)
-        self.assertEqual(self.bot.send_document.await_count,2)
+        self.assertEqual(self.bot.send_media_group.await_count,2)
+        self.assertEqual(self.bot.send_document.await_count,0)
+        self.assertEqual(self.bot.send_video.await_count,1)
         self.assertIsNone(self.app.store.bookmark(7,'job'))
 
     async def test_repeated_clicks_do_not_create_another_delivery(self):
@@ -71,7 +72,7 @@ class WholeFolder(unittest.IsolatedAsyncioTestCase):
         self.bot.send_media_group.side_effect=stop_during_group
         await self.app.execute_delivery(row)
         self.assertEqual(self.app.delivery(row['id'])['state'],'paused')
-        self.assertEqual(self.app.store.view(row['id'],7).received_count(json.loads(row['plan'])),8)
+        self.assertEqual(self.app.store.view(row['id'],7).received_count(json.loads(row['plan'])),10)
         self.bot.send_media_group.side_effect=None
         await self.callback(row,'resume')
         await self.app.execute_delivery(self.app.delivery(row['id']))
@@ -92,7 +93,7 @@ class WholeFolder(unittest.IsolatedAsyncioTestCase):
         row=await self.enqueue();self.bot.send_media_group.side_effect=TimeoutError()
         await self.app.execute_delivery(row)
         await self.callback(row,'received');await self.callback(row,'received')
-        self.assertEqual(self.app.store.view(row['id'],7).message_count,9)
+        self.assertEqual(self.app.store.view(row['id'],7).message_count,11)
         self.bot.send_media_group.side_effect=None
         await self.app.execute_delivery(self.app.delivery(row['id']))
         self.assertEqual(self.app.store.view(row['id'],7).message_count,22)
@@ -112,7 +113,7 @@ class WholeFolder(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.app.delivery(row['id'])['state'],'queued')
 
     async def test_explicit_rate_limit_retries_without_double_counting(self):
-        row=await self.enqueue();self.bot.send_media_group.side_effect=[RetryAfter(1),[],[],[],[]]
+        row=await self.enqueue();self.bot.send_media_group.side_effect=[RetryAfter(1),[],[]]
         await self.app.execute_delivery(row)
         self.assertEqual(self.app.delivery(row['id'])['state'],'complete')
         self.assertEqual(self.app.store.view(row['id'],7).message_count,22)
@@ -123,11 +124,22 @@ class WholeFolder(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.app.delivery(row['id'])['state'],'paused')
         self.assertEqual(self.bot.send_media_group.await_count,1)
 
-    async def test_mixed_photos_videos_share_album_but_documents_stay_separate(self):
+    async def test_documents_photos_and_videos_use_separate_albums(self):
         items=[{'kind':kind,'file_id':str(i)} for i,kind in enumerate(['photo','video','document','video'])]
         result=batches(items)
-        self.assertEqual([len(x) for x in result],[2,1,1])
+        self.assertEqual([len(x) for x in result],[1,1,1,1])
         self.assertEqual([x for group in result for x in group],items)
+
+    async def test_new_plan_puts_original_files_first_without_changing_source_order(self):
+        original=self.app.store.files('job')
+        row=await self.enqueue();plan=json.loads(row['plan'])
+        self.assertEqual([x['kind'] for x in plan],['document']*10+['video']*11)
+        for kind in ('document','video'):
+            self.assertEqual([x['file_id'] for x in plan if x['kind']==kind],
+                             [x['file_id'] for x in original if x['kind']==kind])
+        self.assertEqual(self.app.store.files('job'),original)
+        ordered=display_order(original)
+        self.assertIs(ordered[0],original[0])
 
     async def test_normal_delivery_buttons_have_no_stop_or_browsing_progress(self):
         row=await self.enqueue()
