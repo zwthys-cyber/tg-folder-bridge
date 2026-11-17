@@ -51,7 +51,7 @@ class Dates(unittest.TestCase):
         result=from_exiftool({'File:FileModifyDate':'2026:11:17 00:00:00+00:00',
             'ExifIFD:DateTimeOriginal':'2026:10:23 12:00:00','ExifIFD:OffsetTimeOriginal':'+08:00',
             'Composite:SubSecDateTimeOriginal':'2026:10:23 12:00:00.123+08:00'})
-        self.assertEqual(result['captured_at'],'2026-10-23T04:00:00.123Z')
+        self.assertEqual(result['captured_at'],'2026-10-23T04:00:00.123000Z')
         self.assertTrue(original_source(result['capture_time_source']))
         self.assertEqual(from_exiftool({'XMP-exif:DateTimeOriginal':'2025:05:04 12:00:00+08:00'})['captured_at'],
                          '2025-05-04T04:00:00Z')
@@ -100,7 +100,7 @@ class Sampling(unittest.IsolatedAsyncioTestCase):
                 '-SubSecTimeOriginal=123',str(path),stdout=asyncio.subprocess.DEVNULL,stderr=asyncio.subprocess.DEVNULL)
             self.assertEqual(await p.wait(),0)
             before=path.read_bytes();result=await inspect(path)
-            self.assertEqual(result['captured_at'],'2026-10-23T04:00:00.123Z')
+            self.assertEqual(result['captured_at'],'2026-10-23T04:00:00.123000Z')
             self.assertFalse(result['capture_timezone_assumed'])
             self.assertTrue(original_source(result['capture_time_source']))
             self.assertEqual(path.read_bytes(),before)

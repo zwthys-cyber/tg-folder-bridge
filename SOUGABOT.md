@@ -1,4 +1,4 @@
-# 接入已有 sougabot（0.9.0）
+# 接入已有 sougabot（0.10.0）
 
 目标为 Python 3.13、urllib 调用 Bot API、唯一的 getUpdates 长轮询、systemd 服务 `sougabot`。示例路径为 `/root/sougabot` 和 `/root/tg-folder-bridge`；现有搜索数据库保持在 `/root/sougabot/resources.db`。
 
@@ -6,7 +6,7 @@
 
 正常更新只拉取桥接项目，不再把参考 [integrations/sougabot_bot.py](integrations/sougabot_bot.py) 整体覆盖到定制的 `/root/sougabot/bot.py`。备份、升级和恢复步骤见 [UPGRADE_CATALOG.md](UPGRADE_CATALOG.md)。下载上传和 hybrid 参数见 [TRANSFER.md](TRANSFER.md)、[HYBRID.md](HYBRID.md)。
 
-适配器处理 `/start`、`/favorites`、`/help`、文件夹浏览和管理命令，`/catalog` 命令已删除。先搜索文件夹名称，未命中再走原 `resources.db` 搜索。公开取回、收藏、视频相册、浏览进度与菜单清理均使用独立的 `data/index.sqlite3`，不写入原资源表。
+适配器处理 `/start`、`/favorites`、`/help`、`/notifications`、`/subscribe`、`/unsubscribe`、文件夹浏览和管理命令，`/catalog` 命令已删除。先搜索文件夹名称，未命中再走原 `resources.db` 搜索。公开取回、收藏、视频相册、发送回执、通知订阅与菜单清理均使用独立的 `data/index.sqlite3`，不写入原资源表，也不增加第二个轮询进程。通知默认关闭；用户主动订阅后接收新完成文件夹更新，见 [NOTIFICATIONS.md](NOTIFICATIONS.md)。
 
 ## 首次准备
 
