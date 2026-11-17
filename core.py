@@ -126,6 +126,7 @@ class Store:
                 state TEXT, plan TEXT, pending TEXT DEFAULT '', error TEXT DEFAULT '',
                 UNIQUE(owner,job,origin)
             );
+            CREATE TABLE IF NOT EXISTS source_plans (job TEXT PRIMARY KEY,payload TEXT);
             CREATE TABLE IF NOT EXISTS retry_schedule (
                 job TEXT PRIMARY KEY, attempts INTEGER DEFAULT 0, next_at REAL DEFAULT 0
             );
@@ -293,6 +294,27 @@ class Store:
             [(job, e['source_chat'], e['source_message'], e['position'], e['name'], e['size'], e['kind'])
              for e in entries])
         self.db.commit()
+
+    def saved_source_plan(self,job,expected):
+        import json
+        row=self.db.execute('SELECT payload FROM source_plans WHERE job=?',(job,)).fetchone()
+        if row:
+            result=json.loads(row[0])
+            if len(result)==expected:return [tuple(x) for x in result]
+        if not expected:return []
+        # Migrate old interrupted jobs only when every original position exists.
+        positions={}
+        for row in self.db.execute('SELECT position,source_chat,source_message FROM source_entries WHERE job=? '
+                                  'ORDER BY position,source_message DESC',(job,)):
+            positions.setdefault(row[0],(row[1],row[2]))
+        if set(positions)!=set(range(1,expected+1)):return []
+        return [positions[i] for i in range(1,expected+1)]
+
+    def save_source_plan(self,job,messages):
+        import json
+        with self.db:
+            self.db.execute('INSERT OR REPLACE INTO source_plans VALUES(?,?)',
+                            (job,json.dumps([(m.chat_id,m.id) for m in messages])))
 
     def set_folder_metadata(self, job, metadata):
         for field in ('source_created_at', 'source_updated_at'):

@@ -138,6 +138,22 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
             'SELECT source_message,position FROM source_entries WHERE job=? ORDER BY position',('job',))],
             [(5,1),(6,2),(7,3)])
 
+    async def test_resume_uses_saved_complete_plan_and_only_transfers_missing_media(self):
+        self.bridge.allowed={'epan'}
+        media=[NS(chat_id=101,id=n,raw_text='',photo=None,document=NS(id=n),media=NS(video=False),buttons=[])
+               for n in (11,12,13)]
+        self.bridge.store.set_source_entries('job',[dict(source_chat=101,source_message=m.id,
+            position=i,name=str(m.id),size=1,kind='document') for i,m in enumerate(media,1)])
+        self.bridge.store.add_file('job',(101,1),NS(chat_id=7,message_id=1),'old','document',source_media_key='document:11')
+        self.job['expected']=3
+        self.bridge.client=NS(get_entity=AsyncMock(return_value=NS(id=101,bot=True)),
+            get_messages=AsyncMock(return_value=media),send_message=AsyncMock(),disconnect=AsyncMock())
+        self.bridge.transfer_media=AsyncMock()
+        await self.bridge.collect('https://t.me/epan?start=s_abc',self.job)
+        self.bridge.client.send_message.assert_not_awaited()
+        self.assertEqual([call.args[1] for call in self.bridge.transfer_media.await_args_list],[(101,12),(101,13)])
+        self.assertEqual(self.bridge.store.saved_source_plan('job',3),[(101,11),(101,12),(101,13)])
+
     async def test_foreign_view_session_and_unavailable_favorite_are_rejected(self):
         progress=self.bridge.store.start_view(7,'job')
         query=NS(data=f'bridge_page:{progress.id}:2',answer=AsyncMock(),message=NS(photo=None))

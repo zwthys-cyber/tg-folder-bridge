@@ -1187,9 +1187,25 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill):
 
         job['handle_next_groups'] = handle_buttons
 
-        await follow(link)
-        plan = []
-        while True:
+        plan=[]
+        saved=self.store.saved_source_plan(job['id'],job['expected']) if not job.get('dedup_audit') else []
+        if saved:
+            peers={}
+            for name in self.allowed:
+                entity=await self.client.get_entity(name);peers[entity.id]=entity
+            loaded={}
+            for chat in {x[0] for x in saved}:
+                if chat not in peers:break
+                messages=await self.client.get_messages(peers[chat],ids=[x[1] for x in saved if x[0]==chat])
+                for message in messages:
+                    if message and (message.photo or message.document):loaded[(chat,message.id)]=message
+            if all(key in loaded for key in saved):
+                plan=[loaded[key] for key in saved]
+                self.store.update(job['id'],'running',job['expected'],
+                                  f'已载入原来源清单 {len(plan)} 条，只补传尚未保存的文件。')
+        cached=bool(plan)
+        if not cached:await follow(link)
+        while not cached:
             if job.get('button_error'):
                 raise job['button_error']
             if job['overflow']:
@@ -1217,10 +1233,15 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill):
                 if len(plan) >= 5000:
                     raise RuntimeError('文件计划超过安全上限')
                 plan.append(message)
+                if len(plan)%5==0:
+                    self.store.update(job['id'],'running',job['expected'],
+                        f"正在收集来源清单：{len(plan)} / {job['expected'] if job['expected'] is not None else '未知'} 个媒体。")
             await handle_buttons(message)
             if job['expected'] is not None and len(plan) >= job['expected'] and not job.get('pending_group_clicks'):
                 break
         self.store.set_source_entries(job['id'], [source_entry(m, i) for i, m in enumerate(plan, 1)])
+        if job['expected'] is not None and len(plan)==job['expected']:
+            self.store.save_source_plan(job['id'],plan)
         # Upload in the same source order used for browsing. Native-video
         # preference belongs to duplicate selection, not transfer scheduling.
         job['audit_total'] = len(plan)
