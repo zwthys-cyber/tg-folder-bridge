@@ -41,10 +41,8 @@ class WholeDelivery:
     def delivery_keys(self,row):
         sid=row['id'];job=self.store.get(row['job'])
         keys=[]
-        if row['state'] in {'queued','running','stopping'}:
-            keys.append([Button('⏹ 停止发送',callback_data=f'bridge_delivery:{sid}:stop')])
-        elif row['state']=='paused':
-            keys.append([Button('▶️ 继续发送',callback_data=f'bridge_delivery:{sid}:resume')])
+        if row['state']=='paused':
+            keys.append([Button('重试发送',callback_data=f'bridge_delivery:{sid}:resume')])
         elif row['state']=='uncertain':
             keys += [[Button('确认上一批已收到',callback_data=f'bridge_delivery:{sid}:received')],
                      [Button('确认未收到，重发上一批',callback_data=f'bridge_delivery:{sid}:retry')]]
@@ -88,7 +86,7 @@ class WholeDelivery:
             return
         busy=self.store.db.execute("SELECT * FROM deliveries WHERE owner=? AND state IN ('queued','running','stopping') LIMIT 1",(uid,)).fetchone()
         if busy:
-            await bot.send_message(uid,'已有文件夹正在发送，请先等待完成或停止当前发送。',
+            await bot.send_message(uid,'已有文件夹正在发送，请等待完成后再打开另一个。',
                                    reply_markup=self.delivery_keys(dict(busy)))
             return
         fields=('job','source_chat','source_message','file_id','kind','caption','source_kind','file_size','source_name')
@@ -172,8 +170,8 @@ class WholeDelivery:
         try:
             if not progress.details_sent:
                 pending={'kind':'detail'}
-                await self.delivery_step(row,pending,lambda:bot.send_message(uid,folder_details(job,plan),
-                    reply_markup=self.delivery_keys(self.delivery(sid))),lambda:self.accepted_delivery_intent(row,pending))
+                await self.delivery_step(row,pending,lambda:bot.send_message(uid,folder_details(job,plan)),
+                                         lambda:self.accepted_delivery_intent(row,pending))
             received={tuple(r) for r in self.store.db.execute('SELECT source_chat,source_message FROM view_receipts WHERE session=?',(sid,))}
             remaining=[x for x in plan if (x['source_chat'],x['source_message']) not in received]
             for group in batches(remaining):

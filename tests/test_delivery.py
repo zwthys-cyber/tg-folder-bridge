@@ -128,3 +128,13 @@ class WholeFolder(unittest.IsolatedAsyncioTestCase):
         result=batches(items)
         self.assertEqual([len(x) for x in result],[2,1,1])
         self.assertEqual([x for group in result for x in group],items)
+
+    async def test_normal_delivery_buttons_have_no_stop_or_browsing_progress(self):
+        row=await self.enqueue()
+        labels=[b.text for line in self.app.delivery_keys(row).inline_keyboard for b in line]
+        self.assertFalse(any('停止' in text or '浏览进度' in text or '继续浏览' in text for text in labels))
+        await self.app.execute_delivery(row)
+        for call in self.bot.send_message.await_args_list:
+            keys=call.kwargs.get('reply_markup')
+            if keys:
+                self.assertFalse(any('停止' in b.text for line in keys.inline_keyboard for b in line))
