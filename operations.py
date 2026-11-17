@@ -12,6 +12,7 @@ from telegram import InlineKeyboardButton as Button, InlineKeyboardMarkup as Key
 from telegram.ext import ApplicationHandlerStop
 from core import parse_link
 import automation_control as control
+from menu_actions import menu_guard, retire_menu
 
 FAILURES = {'failed', 'partial', 'needs_review', 'blocked', 'interrupted'}
 TRANSIENT = {'ConnectionError', 'TimeoutError', 'OSError', 'URLError', 'ServerError', 'TimedOut', 'NetworkError'}
@@ -89,8 +90,8 @@ class Operations:
         lines.append('最近备份：' + backup_status)
         keyboard = Keyboard([
             [Button('🔄 刷新',callback_data='bridge_admin:panel')],
-            [Button('继续采集' if control.paused(root,'collector') else '暂停采集',callback_data='bridge_admin:collector'),
-             Button('继续新转存' if control.paused(root,'transfers') else '暂停新转存',callback_data='bridge_admin:transfers')],
+            [Button('继续采集' if control.paused(root,'collector') else '暂停采集',callback_data='bridge_admin:collector:'+('resume' if control.paused(root,'collector') else 'pause')),
+             Button('继续新转存' if control.paused(root,'transfers') else '暂停新转存',callback_data='bridge_admin:transfers:'+('resume' if control.paused(root,'transfers') else 'pause'))],
             [Button('⚠️ 失败任务',callback_data='bridge_admin:failures:1'),
              Button('💾 立即备份',callback_data='bridge_admin:backup')]])
         return '\n\n'.join(lines), keyboard
@@ -220,6 +221,7 @@ class Operations:
             await update.message.reply_text(text,reply_markup=keys)
         raise ApplicationHandlerStop
 
+    @menu_guard
     async def admin_callback(self,update,context):
         query = update.callback_query
         if not self.owner_update(update):
@@ -231,13 +233,21 @@ class Operations:
             await query.answer('正在创建备份')
             result=await self.run_backup()
             await context.bot.send_message(update.effective_chat.id,result)
+            text,keys=self.panel(update.effective_user.id)
+            await context.bot.send_message(update.effective_chat.id,text,reply_markup=keys)
+            await retire_menu(self,context.bot,update.effective_chat.id,query.message)
             raise ApplicationHandlerStop
         if action=='retry' and len(parts)==3:
             await query.answer(self.queue_retry(update.effective_user.id,parts[2]),show_alert=True)
         else:
             if action in {'collector','transfers'}:
-                control.toggle(self.controls_root(),action)
-            await query.answer()
+                if len(parts)!=3 or parts[2] not in {'pause','resume'}:
+                    await query.answer('旧控制按钮已过期，请使用更新后的面板。')
+                else:
+                    control.set_paused(self.controls_root(),action,parts[2]=='pause')
+                    await query.answer()
+            else:
+                await query.answer()
         if action=='failures':
             text,keys=self.failures_panel(update.effective_user.id,int(parts[2]))
         else:

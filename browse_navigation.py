@@ -1,8 +1,10 @@
 """Private-chat directory page jumps without treating ordinary search numbers as pages."""
 import time
 from telegram import ForceReply
+from telegram.error import TelegramError
 from telegram.ext import ApplicationHandlerStop
 from catalog_ui import catalog_page
+from menu_actions import menu_guard, retire_menu
 
 
 class BrowseNavigation:
@@ -43,6 +45,12 @@ class BrowseNavigation:
                 await self.jump_to(update,context,'bridge_catalog',page)
         raise ApplicationHandlerStop
 
+    async def dismiss_jump_prompt(self,bot,chat,pending):
+        if not pending:return
+        try:await bot.delete_message(chat_id=chat,message_id=pending[1])
+        except TelegramError:pass
+
+    @menu_guard
     async def jump_callback(self,update,context):
         query=update.callback_query
         if update.effective_chat.type!='private':
@@ -55,12 +63,15 @@ class BrowseNavigation:
             await query.answer(str(error),show_alert=True)
             raise ApplicationHandlerStop
         await query.answer()
+        key=(update.effective_chat.id,update.effective_user.id)
+        previous=self.pending_jumps.get(key)
         pages=max(1,(len(rows)+9)//10)
         prompt=await context.bot.send_message(update.effective_chat.id,
             f'请回复要跳转的页码（1–{pages}），发送 /cancel 取消。',reply_markup=ForceReply(selective=False))
         if len(self.pending_jumps)>=1000:
             self.pending_jumps.pop(next(iter(self.pending_jumps)))
-        self.pending_jumps[(update.effective_chat.id,update.effective_user.id)] = (prefix,prompt.message_id,time.time()+300)
+        self.pending_jumps[key] = (prefix,prompt.message_id,time.time()+300,query.message)
+        await self.dismiss_jump_prompt(context.bot,update.effective_chat.id,previous)
         raise ApplicationHandlerStop
 
     async def handle_jump_reply(self,update,context,text):
@@ -77,10 +88,15 @@ class BrowseNavigation:
             return True
         if await self.jump_to(update,context,pending[0],int(text)):
             self.pending_jumps.pop(key,None)
+            await self.dismiss_jump_prompt(context.bot,update.effective_chat.id,pending)
+            if len(pending)>3:
+                deleted=await self.dismiss_catalog(context.bot,update.effective_chat.id,pending[3]) if hasattr(self,'dismiss_catalog') else False
+                await retire_menu(self,context.bot,update.effective_chat.id,pending[3],clear=not deleted)
         return True
 
     async def cancel_jump(self,update,context):
         if update.effective_chat.type=='private':
-            self.pending_jumps.pop((update.effective_chat.id,update.effective_user.id),None)
+            pending=self.pending_jumps.pop((update.effective_chat.id,update.effective_user.id),None)
+            await self.dismiss_jump_prompt(context.bot,update.effective_chat.id,pending)
             await update.message.reply_text('已取消页码输入。')
         raise ApplicationHandlerStop

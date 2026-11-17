@@ -159,7 +159,7 @@ class OperationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.app.handle_jump_reply(self.update,NS(),'1051'))
         self.update.message.reply_to_message=NS(message_id=42)
         self.app.jump_to=AsyncMock(return_value=True)
-        self.assertTrue(await self.app.handle_jump_reply(self.update,NS(),'2'))
+        self.assertTrue(await self.app.handle_jump_reply(self.update,NS(bot=NS(delete_message=AsyncMock())),'2'))
         self.app.jump_to.assert_awaited_once_with(self.update,unittest.mock.ANY,'bridge_catalog',2)
         self.assertNotIn((7,7),self.app.pending_jumps)
 

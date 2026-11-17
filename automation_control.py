@@ -35,3 +35,9 @@ def toggle(root, name):
     values[name + '_paused'] = not bool(values.get(name + '_paused', False))
     write(root, values)
     return values[name + '_paused']
+
+
+def set_paused(root,name,value):
+    values=read(root)
+    values[name+'_paused']=bool(value)
+    write(root,values)

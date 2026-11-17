@@ -7,6 +7,7 @@ from telegram import InputMediaPhoto, InputMediaVideo, InputMediaDocument
 from telegram.error import RetryAfter, BadRequest, Forbidden
 from telegram.ext import ApplicationHandlerStop
 from catalog_ui import folder_details, favorite_button
+from menu_actions import menu_guard, retire_menu
 
 
 class DeliveryPaused(Exception):
@@ -93,7 +94,7 @@ class WholeDelivery:
                 self.delivery_state(row['id'],'queued',pending={})
                 row=self.delivery(row['id'],uid)
             await self.delivery_status(bot,row)
-            return
+            return True
         busy=self.store.db.execute("SELECT * FROM deliveries WHERE owner=? AND state IN ('queued','running','stopping') LIMIT 1",(uid,)).fetchone()
         if busy:
             await bot.send_message(uid,'已有文件夹正在发送，请等待完成后再打开另一个。',
@@ -109,6 +110,7 @@ class WholeDelivery:
         ahead=self.store.db.execute("SELECT 1 FROM deliveries WHERE id<>? AND state IN ('queued','running','stopping') LIMIT 1",(progress.id,)).fetchone()
         if ahead:
             await self.delivery_status(bot,self.delivery(progress.id,uid))
+        return True
 
     def recover_deliveries(self):
         with self.store.db:
@@ -231,6 +233,7 @@ class WholeDelivery:
             else:
                 await asyncio.sleep(.5)
 
+    @menu_guard
     async def delivery_callback(self,update,context):
         query=update.callback_query
         parts=query.data.split(':')
@@ -252,4 +255,5 @@ class WholeDelivery:
                 self.store.db.execute("UPDATE deliveries SET state=?,pending='' WHERE id=?",(state,row['id']))
         await query.answer()
         await self.delivery_status(context.bot,self.delivery(row['id']))
+        await retire_menu(self,context.bot,update.effective_chat.id,query.message)
         raise ApplicationHandlerStop

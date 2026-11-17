@@ -88,8 +88,32 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.bridge.store.catalog_panel_stats(7,102))
         bot.delete_message.reset_mock()
         self.bridge.show_folder_card.side_effect=RuntimeError('cover send failed')
+        query.message.message_id=103
         with self.assertRaises(RuntimeError):
             await self.bridge.catalog_callback(update,NS(bot=bot))
+        bot.delete_message.assert_not_awaited()
+
+    async def test_view_retires_only_an_accepted_delivery_card(self):
+        self.bridge.store.update('job','complete',0)
+        query=NS(data='bridge_view:job:1',answer=AsyncMock(),message=NS(message_id=901))
+        update=NS(callback_query=query,effective_chat=NS(type='private',id=7),effective_user=NS(id=7))
+        bot=NS(edit_message_reply_markup=AsyncMock())
+        self.bridge.queue_whole_folder=AsyncMock(return_value=None)
+        with self.assertRaises(ApplicationHandlerStop):await self.bridge.catalog_callback(update,NS(bot=bot))
+        bot.edit_message_reply_markup.assert_not_awaited()
+        self.bridge.queue_whole_folder.return_value=True
+        with self.assertRaises(ApplicationHandlerStop):await self.bridge.catalog_callback(update,NS(bot=bot))
+        bot.edit_message_reply_markup.assert_awaited_once_with(chat_id=7,message_id=901,reply_markup=None)
+        with self.assertRaises(ApplicationHandlerStop):await self.bridge.catalog_callback(update,NS(bot=bot))
+        self.assertEqual(self.bridge.queue_whole_folder.await_count,2)
+
+    async def test_photo_back_keeps_cover_and_cleans_old_buttons(self):
+        query=NS(data='bridge_catalog:1',answer=AsyncMock(),message=NS(message_id=902,photo=[NS(file_id='cover')]))
+        update=NS(callback_query=query,effective_chat=NS(type='private',id=7),effective_user=NS(id=7))
+        bot=NS(send_message=AsyncMock(return_value=NS(message_id=903)),edit_message_reply_markup=AsyncMock(),delete_message=AsyncMock())
+        with self.assertRaises(ApplicationHandlerStop):await self.bridge.catalog_callback(update,NS(bot=bot))
+        bot.send_message.assert_awaited_once()
+        bot.edit_message_reply_markup.assert_awaited_once_with(chat_id=7,message_id=902,reply_markup=None)
         bot.delete_message.assert_not_awaited()
 
     async def test_catalog_pair_is_recorded_and_survives_store_reopen(self):
@@ -184,11 +208,13 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
             self.bridge.show_folder_card.assert_awaited_once()
             send_page.assert_not_awaited()
             self.bridge.queue_whole_folder=AsyncMock()
+            query.message.message_id=100
             query.data='bridge_view:job:1'
             with self.assertRaises(ApplicationHandlerStop):
                 await self.bridge.catalog_callback(update,NS(bot=bot))
             self.bridge.queue_whole_folder.assert_awaited_once()
             send_page.assert_not_awaited()
+            query.message.message_id=101
             query.data='bridge_catalog:1';query.message.photo=[NS(file_id='cover')]
             with self.assertRaises(ApplicationHandlerStop):
                 await self.bridge.catalog_callback(update,NS(bot=bot))

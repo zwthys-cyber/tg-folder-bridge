@@ -107,6 +107,9 @@ class Store:
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
         self.db.executescript('''
+            CREATE TABLE IF NOT EXISTS retired_menus (
+                chat INTEGER, message INTEGER, PRIMARY KEY(chat,message)
+            );
             CREATE TABLE IF NOT EXISTS catalog_panels (
                 chat INTEGER, list_message INTEGER, stats_message INTEGER,
                 PRIMARY KEY(chat,list_message)

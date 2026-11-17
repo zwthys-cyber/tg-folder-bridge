@@ -24,6 +24,7 @@ from adaptive_speed import AdaptiveSpeed
 from upload_transport import UploadTransport
 from bot_api_config import endpoint, LOCAL
 from local_upload import eligible, send_local, DeliveryUnknownError
+from menu_actions import menu_guard, retire_menu
 from content_identity import analyze, preference
 from source_lock import source_lease
 from operations import Operations
@@ -32,7 +33,7 @@ from delivery import WholeDelivery
 from capture_backfill import CaptureBackfill
 import automation_control
 
-VERSION = '0.9.1'
+VERSION = '0.9.2'
 
 
 class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill):
@@ -290,6 +291,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill):
             if await self.search_text(update.effective_chat.id, update.effective_user.id, text):
                 raise ApplicationHandlerStop
 
+    @menu_guard
     async def catalog_callback(self, update, context):
         query = update.callback_query
         if update.effective_chat.type != 'private':
@@ -298,8 +300,9 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill):
             parts = query.data.split(':')
             if parts[0]=='bridge_view' and len(parts)==3 and parts[2]=='1':
                 await query.answer()
-                await self.queue_whole_folder(context.bot,update.effective_user.id,
+                accepted=await self.queue_whole_folder(context.bot,update.effective_user.id,
                     self.store.get(parts[1]),query.message.message_id)
+                if accepted:await retire_menu(self,context.bot,update.effective_chat.id,query.message)
                 raise ApplicationHandlerStop
             if parts[0] in {'bridge_catalog','bridge_favorites'}:
                 page = int(parts[1])
@@ -307,10 +310,12 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill):
                 favorites = parts[0] == 'bridge_favorites'
                 rows = self.favorite_rows(update.effective_user.id) if favorites else self.store.catalog()
                 text, markup = catalog_page(rows, page, parts[0], favorites=favorites)
-                if getattr(query.message, 'photo', None):
+                old_text=getattr(query.message,'text',None) or ''
+                if getattr(query.message, 'photo', None) or not old_text.startswith(('📁 文件夹列表','⭐ 我的收藏','搜索：')):
                     listing=await context.bot.send_message(update.effective_chat.id, text, reply_markup=markup)
                     if not favorites:
                         self.store.register_catalog_panel(update.effective_chat.id,listing.message_id)
+                    await retire_menu(self,context.bot,update.effective_chat.id,query.message)
                 else:
                     await query.edit_message_text(text, reply_markup=markup)
             elif parts[0] == 'bridge_search':
@@ -354,7 +359,8 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill):
                 items = self.store.files(job['id'])
                 if parts[0] == 'bridge_open' and page == 1:
                     await self.show_folder_card(context.bot, update.effective_chat.id, job, items)
-                    await self.dismiss_catalog(context.bot,update.effective_chat.id,query.message)
+                    deleted=await self.dismiss_catalog(context.bot,update.effective_chat.id,query.message)
+                    await retire_menu(self,context.bot,update.effective_chat.id,query.message,clear=not deleted)
                 else:
                     if progress is None:
                         old_text=getattr(query.message,'text',None) or ''
@@ -364,6 +370,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill):
                     await send_file_page(context.bot, update.effective_chat.id, job,
                                          items, page, self.send_stored,progress=progress,
                                          favorite=self.store.is_favorite(update.effective_user.id,job['id']))
+                    await retire_menu(self,context.bot,update.effective_chat.id,query.message)
         except (ValueError, IndexError):
             await query.answer('列表已更新，请重新发送 /start', show_alert=True)
         raise ApplicationHandlerStop
@@ -384,6 +391,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill):
                 print('菜单消息清理暂不可用：'+type(exc).__name__,flush=True)
         if removed:
             self.store.forget_catalog_panel(chat,message_id)
+        return removed
 
     async def show_folder_card(self, bot, chat, job, items):
         photo = job.get('cover_file_id')
@@ -657,6 +665,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill):
             await update.message.reply_text('内容核验已排队。确认相同内容后优先保留原始信息更完整的一份；未确认的版本保留。')
         raise ApplicationHandlerStop
 
+    @menu_guard
     async def original(self, update, context):
         query = update.callback_query
         if update.effective_user.id not in self.owners or update.effective_chat.type != 'private':
@@ -674,6 +683,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill):
             raise ApplicationHandlerStop
         await query.answer()
         await self.send_stored(context.bot, update.effective_chat.id, item, use_preview=False)
+        await retire_menu(self,context.bot,update.effective_chat.id,query.message)
         raise ApplicationHandlerStop
 
     async def send_stored(self, bot, chat_id, item, use_preview=True):
