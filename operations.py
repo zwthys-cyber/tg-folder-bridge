@@ -37,7 +37,7 @@ class Operations:
         result=[]
         for row in self.store.db.execute("SELECT * FROM jobs WHERE owner=? AND state IN ('failed','partial','needs_review','blocked','interrupted') ORDER BY rowid DESC",(uid,)):
             try:
-                if parse_link(row['link'],allowed) in completed:continue
+                if parse_link(row['link'],allowed) in completed and not self.store.unknown_local_send(row['id']):continue
             except ValueError:pass
             result.append(dict(row))
         return result
@@ -116,13 +116,13 @@ class Operations:
         row = self.store.get(job_id)
         if not row or row['owner'] != uid:
             return '没有这个任务。'
+        if self.store.unknown_local_send(job_id):
+            return '上传结果未知，请先检查聊天并使用 /resolve，不能直接重试。'
         duplicate=self.completed_duplicate(row)
         if duplicate:
             with self.store.db:
                 self.store.db.execute('UPDATE retry_schedule SET next_at=0 WHERE job=?',(job_id,))
             return f"该分享已由另一任务完成，无需重复续传。\n/folder {duplicate['id']}"
-        if self.store.unknown_local_send(job_id):
-            return '上传结果未知，请先检查聊天并使用 /resolve，不能直接重试。'
         if row['state'] not in FAILURES:
             return '此任务已完成、排队或正在运行，无需重复提交。'
         if self.blocked or self.jobs.full():

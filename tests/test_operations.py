@@ -70,6 +70,9 @@ class OperationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('另一任务完成',self.app.queue_retry(7,'job'))
         self.assertTrue(self.app.jobs.empty())
         self.assertEqual(self.app.store.get('job')['state'],'partial')
+        self.app.store.begin_local_send('job',(1,2),'token')
+        self.assertEqual(len(self.app.failed_rows(7)),1)
+        self.assertIn('结果未知',self.app.queue_retry(7,'job'))
 
     async def test_unknown_delivery_is_never_automatically_retried(self):
         self.app.store.begin_local_send('job',(1,2),'token')

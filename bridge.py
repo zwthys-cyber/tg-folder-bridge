@@ -592,11 +592,11 @@ class Bridge(Operations, BrowseNavigation):
         job = self.store.get(context.args[0]) if context.args else None
         if not job or job['owner'] != update.effective_user.id:
             await update.message.reply_text('用法：/resume 原任务编号')
+        elif self.store.unknown_local_send(job['id']):
+            await update.message.reply_text('上次本地上传结果未知。先检查聊天，确认未收到后发送：\n/resolve '+job['id']+' retry')
         elif self.completed_duplicate(job):
             completed=self.completed_duplicate(job)
             await update.message.reply_text(f"该分享已有完成任务，无需重复续传。\n/folder {completed['id']}")
-        elif self.store.unknown_local_send(job['id']):
-            await update.message.reply_text('上次本地上传结果未知。先检查聊天，确认未收到后发送：\n/resolve '+job['id']+' retry')
         elif self.blocked or self.jobs.full():
             await update.message.reply_text('服务暂不能接收续传任务；收件未确认时请先重启。')
         elif job['state'] in {'queued', 'running', 'cooldown'}:
