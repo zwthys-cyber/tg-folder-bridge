@@ -892,6 +892,30 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         states = self.bridge.store.db.execute('SELECT state FROM local_send_intents ORDER BY id')
         self.assertEqual([row[0] for row in states], ['rejected', 'confirmed'])
 
+    async def test_hybrid_switches_to_relay_after_confirmed_document_rejection(self):
+        self.bridge.upload_backend = 'hybrid'
+        path = Path(self.tmp.name)/'original.mov'
+        path.write_bytes(b'original')
+        send_document = AsyncMock(side_effect=BadRequest('unexpected server rejection'))
+        self.bridge.app = NS(bot=NS(local_mode=True, base_url=LOCAL+'/botTEST',
+                                    send_document=send_document))
+        self.bridge.get_upload_transport = AsyncMock(return_value=None)
+
+        async def send_relay(destination, uploaded, **kwargs):
+            self.assertFalse(self.bridge.store.unknown_local_send('job'))
+            self.assertEqual(self.bridge.pending['marker'], 'nonce')
+            self.assertTrue(kwargs['force_document'])
+            self.bridge.pending['future'].set_result(None)
+
+        with patch.object(self.bridge.client, 'send_file', new=AsyncMock(side_effect=send_relay)) as relay:
+            with patch('bridge.upload_file', new=AsyncMock(return_value='uploaded')) as upload:
+                await self.bridge.deliver(NS(raw_text='', photo=None), (1, 2),
+                                          marker='nonce', upload_path=path)
+        send_document.assert_awaited_once()
+        upload.assert_awaited_once()
+        relay.assert_awaited_once()
+        self.assertIsNone(self.bridge.pending)
+
     async def test_hybrid_does_not_fallback_on_unknown_or_chat_rejection(self):
         self.bridge.active = dict(id='job', expected=1)
         path = Path(self.tmp.name)/'original.mov'

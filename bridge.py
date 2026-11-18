@@ -1098,7 +1098,8 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 return await self.deliver_local(message, key, marker, upload_path, attrs,
                                                 preview, thumbnail, replace_original)
             except LocalBotUploadRejected as exc:
-                if exc.reason not in {'local_file', 'file_reference', 'file_parts', 'file_size'}:
+                if exc.reason not in {'local_file', 'file_reference', 'file_parts', 'file_size',
+                                      'message_rejected', 'unclassified'}:
                     raise
                 print(f"本地上传已拒绝，改用中转通道：{self.active['id']} {exc.reason}", flush=True)
         future = asyncio.get_running_loop().create_future()
