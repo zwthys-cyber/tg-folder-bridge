@@ -128,6 +128,14 @@ async def upload_file(client, path, progress, workers=8, worker_limit=None, stat
             while pending:
                 await inspect_finished()
 
+    async def prepare(selected):
+        try:
+            await selected.prepare()
+        except OSError as error:
+            if isinstance(error, ConnectionError):
+                raise
+            raise ConnectionError('Media upload connection could not be opened') from error
+
     async def compare_routes():
         sample = min(ROUTE_SAMPLE_PARTS, parts // 3)
         fixed = min(4, limit())
@@ -141,7 +149,7 @@ async def upload_file(client, path, progress, workers=8, worker_limit=None, stat
                 stats['route_choice'] = 'control_rate_wait'
                 return
             try:
-                await transport.prepare()
+                await prepare(transport)
                 choose(transport)
                 began, previous = time.monotonic(), completed
                 await transmit(sample, 2 * sample, fixed)
@@ -170,7 +178,7 @@ async def upload_file(client, path, progress, workers=8, worker_limit=None, stat
         for attempt in range(4 if comparing else 3):
             try:
                 if active_transport:
-                    await active_transport.prepare()
+                    await prepare(active_transport)
                 await transmit(0, parts)
                 break
             except BaseException as exc:
