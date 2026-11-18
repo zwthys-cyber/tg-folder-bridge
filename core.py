@@ -214,6 +214,7 @@ class Store:
         if not had_notices:
             # Enabling the feature must never broadcast the whole existing catalog.
             self.db.execute("INSERT OR IGNORE INTO notice_events SELECT id,0 FROM jobs WHERE state='complete' OR audit_public=1")
+        self.db.execute('CREATE INDEX IF NOT EXISTS files_by_media_key ON files(media_key)')
         self.db.execute("UPDATE jobs SET restart_pending=1 WHERE state IN ('running','queued','cooldown')")
         self.recoverable_jobs = [row['id'] for row in self.db.execute(
             "SELECT id FROM jobs WHERE restart_pending=1 AND state IN "
@@ -450,6 +451,34 @@ class Store:
             "AND ((content_sha256<>'' AND content_sha256=?) OR (stream_sha256<>'' AND stream_sha256=?)) LIMIT 1",
             (job, *source, analysis['content_sha256'], analysis['stream_sha256'])).fetchone()
         return dict(row) if row else None
+
+    def reusable_document(self, job, entry, key, kind):
+        if not key.startswith('document:') or not entry['name'] or not entry['size']:
+            return None
+        row = self.db.execute('''SELECT f.* FROM files f
+            JOIN jobs origin ON origin.id=f.job AND origin.state='complete'
+            JOIN jobs target ON target.id=? AND target.owner=origin.owner
+            JOIN source_entries e ON e.job=f.job AND e.source_chat=f.source_chat
+              AND e.source_message=f.source_message
+            WHERE f.job<>target.id AND f.media_key=? AND f.source_chat=?
+              AND e.name=? AND e.size=? AND e.kind=? AND f.kind=? AND f.chat=target.owner
+              AND length(f.content_sha256)=64 AND f.file_id<>''
+              AND EXISTS(SELECT 1 FROM local_send_intents i WHERE i.job=f.job
+                AND i.source_chat=f.source_chat AND i.source_message=f.source_message
+                AND i.state='confirmed' AND i.marker LIKE 'bridge:%')
+            ORDER BY f.has_thumbnail DESC, origin.rowid DESC LIMIT 1''',
+            (job, key, entry['source_chat'], entry['name'], entry['size'], entry['kind'], kind)).fetchone()
+        return dict(row) if row else None
+
+    def reuse_document(self, job, source, original, caption):
+        with self.db:
+            self.db.execute('''INSERT INTO files
+                (job,source_chat,source_message,chat,message,file_id,kind,caption,media_key,
+                 has_thumbnail,content_sha256,stream_sha256,quality_json)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                (job, *source, original['chat'], original['message'], original['file_id'],
+                 original['kind'], caption, original['media_key'], original['has_thumbnail'],
+                 original['content_sha256'], original['stream_sha256'], original['quality_json']))
 
     def merge_alias(self, job, source, canonical, source_media_key):
         if source == canonical:

@@ -985,6 +985,25 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
 
     async def transfer_media(self, message, key, job, preview_only=False, replace_original=False, existing=None):
         if self.transfer_mode == 'download_upload':
+            original = job.get('reusable_documents', {}).get(key)
+            if original and not (preview_only or replace_original or existing):
+                import json
+                analysis = dict(content_sha256=original['content_sha256'],
+                                stream_sha256=original['stream_sha256'],
+                                quality=json.loads(original['quality_json']))
+                duplicate = self.store.duplicate(job['id'], key, analysis)
+                if duplicate and preference(analysis['quality']) <= preference(json.loads(duplicate['quality_json'])):
+                    self.store.merge_alias(job['id'], key,
+                        (duplicate['source_chat'], duplicate['source_message']), media_key(message))
+                else:
+                    self.store.reuse_document(job['id'], key, original, message.raw_text or '')
+                    if duplicate:
+                        self.store.merge_alias(job['id'], (duplicate['source_chat'], duplicate['source_message']),
+                                               key, duplicate['media_key'])
+                job['phase'] = '复用已保存文件'
+                self.store.update(job['id'], 'running', job['expected'], '已复用机器人确认保存的同一原文件。')
+                self.store.record_transfer(job['id'], '复用', dict(bytes=message.file.size, transport='saved_file_id'))
+                return
             job['phase'] = '下载'
             self.store.update(job['id'], 'running', job['expected'], '正在下载一个文件到临时目录。')
             job['download_stats'] = {}
@@ -1272,7 +1291,8 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
             await handle_buttons(message)
             if job['expected'] is not None and len(plan) >= job['expected'] and not job.get('pending_group_clicks'):
                 break
-        self.store.set_source_entries(job['id'], [source_entry(m, i) for i, m in enumerate(plan, 1)])
+        entries = [source_entry(m, i) for i, m in enumerate(plan, 1)]
+        self.store.set_source_entries(job['id'], entries)
         if job['expected'] is not None and len(plan)==job['expected']:
             self.store.save_source_plan(job['id'],plan)
         # Upload in the same source order used for browsing. Native-video
@@ -1283,6 +1303,20 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
         saved_media = {row.get('media_key') for row in remaining.values() if row.get('media_key')}
         allowed = {(m.chat_id, m.id) for m in plan
                    if (m.chat_id, m.id) not in remaining and media_key(m) not in saved_media}
+        if (self.spool and self.upload_backend == 'hybrid' and self.document_groups
+                and not job.get('dedup_audit')):
+            reusable = {}
+            for message, entry in zip(plan, entries):
+                key = (message.chat_id, message.id)
+                if key not in allowed or not entry['size'] or not eligible(entry['size']):
+                    continue
+                kind = 'video' if getattr(getattr(message, 'media', None), 'video', False) else 'document'
+                original = self.store.reusable_document(job['id'], entry, media_key(message), kind)
+                needs_thumbnail = self.heic_previews and entry['name'].lower().endswith(('.heic', '.heif'))
+                if original and (not needs_thumbnail or original['has_thumbnail']):
+                    reusable[key] = original
+            job['reusable_documents'] = reusable
+            allowed.difference_update(reusable)
         def stage_ahead(message, stats, progress):
             stats['pipeline'] = True
             return self.spool.stage(self.client, message, progress=progress,
@@ -1331,6 +1365,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 await asyncio.sleep(self.transfer_pause)
         finally:
             job.pop('download_pipeline', None)
+            job.pop('reusable_documents', None)
             await pipeline.close()
         if job.get('dedup_audit') and any(not row.get('content_sha256') for row in self.store.files(job['id'])):
             # Existing saved rows do not prove this audit actually inspected

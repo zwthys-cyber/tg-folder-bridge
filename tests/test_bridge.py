@@ -266,6 +266,44 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bridge.store.files('job')[0]['file_id'], 'file2')
         self.assertEqual(self.bridge.store.processed_count('job'), 2)
 
+    async def test_complete_folder_receipt_reuses_same_document_without_spooling(self):
+        store = self.bridge.store
+        store.create('origin', 7, 'https://t.me/epan?start=s_old')
+        store.add_file('origin', (101, 10), NS(chat_id=7, message_id=77),
+                       'confirmed-file', 'document', source_media_key='document:42')
+        store.set_analysis('origin', (101, 10), dict(content_sha256='a'*64,
+                           stream_sha256='', quality={'native_source': False}))
+        size = 100 * 1024**2
+        store.set_source_entries('origin', [dict(source_chat=101, source_message=10,
+            position=1, name='same.mov', size=size, kind='video')])
+        intent = store.begin_local_send('origin', (101, 10), 'bridge:origin:token')
+        store.confirm_local_send(intent, store.db.commit)
+        store.update('origin', 'complete', 1)
+        media = NS(chat_id=101, id=20, raw_text='new caption', photo=None,
+                   document=NS(id=42), media=NS(video=False), buttons=[],
+                   file=NS(name='same.mov', size=size, mime_type='video/quicktime'))
+
+        async def send(*args):
+            await self.job['events'].put(media)
+
+        self.bridge.client = NS(get_entity=AsyncMock(return_value=NS(id=101, bot=True)),
+            get_messages=AsyncMock(return_value=[]), send_message=AsyncMock(side_effect=send),
+            disconnect=AsyncMock())
+        self.bridge.spool = NS(stage=AsyncMock(), close=lambda: None)
+        self.bridge.transfer_mode = 'download_upload'
+        self.bridge.upload_backend = 'hybrid'
+        self.bridge.deliver = AsyncMock()
+        self.job['expected'] = 1
+        await self.bridge.collect('https://t.me/epan?start=s_abc', self.job)
+        self.bridge.spool.stage.assert_not_called()
+        self.bridge.deliver.assert_not_awaited()
+        [saved] = store.files('job')
+        self.assertEqual((saved['file_id'], saved['message'], saved['caption']),
+                         ('confirmed-file', 77, 'new caption'))
+        store.create('other-owner', 8, 'https://t.me/epan?start=s_other')
+        self.assertIsNone(store.reusable_document('other-owner', store.files('origin')[0] | {
+            'name': 'same.mov', 'size': size, 'kind': 'video'}, 'document:42', 'document'))
+
     async def test_follow_url_forward_cloud_and_record_bot_file_id(self):
         target = NS(url='https://t.me/SPXM111_bot?start=s_files', data=None, text='📥 获取文件')
         root = NS(chat_id=101, id=2, raw_text='图片数：1 张', photo=None,
