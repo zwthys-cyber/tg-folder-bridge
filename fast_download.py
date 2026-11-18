@@ -61,14 +61,18 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
     chunk = 512 * 1024
     pool = min(32 if worker_limit else workers, (size+chunk-1)//chunk)
     stride = pool * chunk
-    limiter = LiveLimiter(worker_limit or (lambda: workers), pool)
+    configured_limit = worker_limit or (lambda: workers)
+    temporary_limit = pool
+    limiter = LiveLimiter(lambda: min(configured_limit(), temporary_limit), pool)
     completed = 0
     pause_until = 0.0
+    next_increase = 0.0
+    clean_parts = 0
     stats.update(mode='parallel', workers=limiter.limit(), parts=0, wait_seconds=0.0)
     meter = TransferMeter(stats, size, transport='sdk_ranges')
 
     async def download_range(index):
-        nonlocal completed, pause_until
+        nonlocal completed, pause_until, temporary_limit, next_increase, clean_parts
         offset = index * chunk
         count = (size - offset + stride - 1) // stride
         def iterator_at(position, remaining):
@@ -86,8 +90,22 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
                     try:
                         async with limiter.slot():
                             began = time.monotonic()
+                            # A queued range may have acquired its slot after
+                            # another request received a rate limit.
+                            if began < pause_until:
+                                continue
                             started = True
-                            data = await iterator.__anext__()
+                            try:
+                                data = await iterator.__anext__()
+                            except Exception as error:
+                                wait = rate_wait(error, retries)
+                                if wait is not None:
+                                    if began >= pause_until:
+                                        temporary_limit = max(1, limiter.limit() // 2)
+                                    pause_until = max(pause_until, time.monotonic()+wait)
+                                    next_increase = pause_until+8
+                                    clean_parts = 0
+                                raise
                         break
                     except StopAsyncIteration:
                         raise DownloadCoverageError('Download range ended early') from None
@@ -108,6 +126,12 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
                         started = False
                 stats['workers'] = limiter.limit()
                 stats['parts'] += 1
+                if began >= pause_until and temporary_limit < pool:
+                    clean_parts += 1
+                    if clean_parts >= 32 and time.monotonic() >= next_increase:
+                        temporary_limit += 1
+                        clean_parts = 0
+                        next_increase = time.monotonic()+8
                 stats['wait_seconds'] += time.monotonic() - began
                 expected = min(chunk, size-offset)
                 if len(data) != expected:

@@ -3,7 +3,7 @@ import io
 import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace as NS
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock
 from telethon import TelegramClient, types
 from telethon.sessions import MemorySession
 from fast_download import DownloadCoverageError, download_file
@@ -52,11 +52,11 @@ class Downloads(unittest.IsolatedAsyncioTestCase):
             iterators.append(iterator)
             return iterator
         stats, output = {}, io.BytesIO()
-        with patch('fast_download.asyncio.sleep', new=AsyncMock()):
-            await download_file(NS(iter_download=iterate), NS(document=True,
-                file=NS(size=len(data))), output, workers=4, stats=stats)
+        await download_file(NS(iter_download=iterate), NS(document=True,
+            file=NS(size=len(data))), output, workers=4, stats=stats)
         self.assertEqual(output.getvalue(), data)
         self.assertEqual(stats['retries'], 1)
+        self.assertEqual(stats['workers'], 2)
         self.assertIn(4*1024**2, offsets)
         self.assertEqual(offsets.count(0), 1)
         self.assertTrue(all(it.closed for it in iterators))
