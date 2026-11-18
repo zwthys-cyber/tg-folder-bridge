@@ -594,11 +594,13 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                  f'上传路由：{self.upload_backend}（hybrid：2000 MB 以内本地 API，超出走中转）。']
         for row in self.store.transfer_history(8):
             m = row['payload']
+            cooldown = (f"\n限流响应 {m['rate_waits']} 次，合计等待 {m.get('cooldown_seconds', 0):.1f} 秒"
+                        if m.get('rate_waits') else '')
             lines.append(f"{row['at']} UTC · {row['phase']} · {row['job']}\n"
                 f"{m.get('bytes', 0)/1024**2:.1f} MiB / {m.get('seconds', 0):.1f} 秒 · "
                 f"{m.get('average_mib', 0):.2f} MiB/s\n"
                 f"{m.get('transport', '?')} · {m.get('connections', 1)} 连接 · "
-                f"p95 {m.get('p95_ms', 0):.0f} ms · 分块续传 {m.get('retries', 0)} 次 · {m.get('error') or '阶段完成'}")
+                f"p95 {m.get('p95_ms', 0):.0f} ms · 分块续传 {m.get('retries', 0)} 次 · {m.get('error') or '阶段完成'}{cooldown}")
         if len(lines) == 1:
             lines.append('还没有新版本的传输记录，当前文件完成后可查看。')
         await update.message.reply_text('\n\n'.join(lines))

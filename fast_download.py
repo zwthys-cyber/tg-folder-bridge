@@ -39,6 +39,40 @@ class WideDownloadUnsupported(RuntimeError):
     pass
 
 
+class RequestPacer:
+    """Space request starts after a rate limit, independently of in-flight size."""
+
+    def __init__(self):
+        self.interval = 0.0
+        self.next_request = 0.0
+        self.resume_at = 0.0
+        self.cooldown_seconds = 0.0
+
+    def delay(self, now):
+        return max(0.0, self.resume_at - now, self.next_request - now)
+
+    def elapsed_cooldown(self, now):
+        return self.cooldown_seconds - max(0.0, self.resume_at - now)
+
+    def started(self, now):
+        self.next_request = now + self.interval
+
+    def pause(self, now, seconds):
+        until = max(self.resume_at, now + seconds)
+        self.cooldown_seconds += max(0.0, until - max(now, self.resume_at))
+        self.resume_at = until
+
+    def limited(self, now, began, seconds, *, pace):
+        first = began >= self.resume_at
+        if first and pace:
+            self.interval = min(0.5, max(0.10, self.interval * 1.20))
+        self.pause(now, seconds)
+        return first
+
+    def recover(self):
+        self.interval = max(0.06, self.interval - 0.015) if self.interval else 0.0
+
+
 async def wide_parts(client, document, offset, stride, count, chunk):
     location = types.InputDocumentFileLocation(document.id, document.access_hash,
                                                document.file_reference, '')
@@ -100,15 +134,16 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
     temporary_limit = pool
     limiter = LiveLimiter(lambda: min(configured_limit(), temporary_limit), pool)
     completed = 0
-    pause_until = 0.0
+    pacer = RequestPacer()
     next_increase = 0.0
     clean_parts = 0
-    stats.update(mode='parallel', workers=limiter.limit(), parts=0, wait_seconds=0.0)
+    stats.update(mode='parallel', workers=limiter.limit(), parts=0, wait_seconds=0.0,
+                 rate_waits=0, cooldown_seconds=0.0, pace_ms=0)
     transport = 'mtproto_1m' if wide else 'sdk_ranges'
     meter = TransferMeter(stats, size, transport=transport)
 
     async def download_range(index):
-        nonlocal completed, pause_until, temporary_limit, next_increase, clean_parts
+        nonlocal completed, temporary_limit, next_increase, clean_parts
         offset = index * chunk
         count = (size - offset + stride - 1) // stride
         def iterator_at(position, remaining):
@@ -125,7 +160,7 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
             for part in range(count):
                 retries = 0
                 while True:
-                    delay = pause_until-time.monotonic()
+                    delay = pacer.delay(time.monotonic())
                     if delay > 0:
                         await asyncio.sleep(delay)
                     try:
@@ -133,18 +168,22 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
                             began = time.monotonic()
                             # A queued range may have acquired its slot after
                             # another request received a rate limit.
-                            if began < pause_until:
+                            if pacer.delay(began):
                                 continue
+                            pacer.started(began)
                             started = True
                             try:
                                 data = await iterator.__anext__()
                             except Exception as error:
                                 wait = rate_wait(error, retries)
                                 if wait is not None:
-                                    if began >= pause_until:
-                                        temporary_limit = max(1, limiter.limit() // 2)
-                                    pause_until = max(pause_until, time.monotonic()+wait)
-                                    next_increase = pause_until+8
+                                    if pacer.limited(time.monotonic(), began, wait, pace=wide):
+                                        # A paced pair can keep a request in flight
+                                        # while avoiding two simultaneous starts.
+                                        floor = 2 if wide else 1
+                                        temporary_limit = max(floor, limiter.limit() // 2)
+                                    stats['rate_waits'] += 1
+                                    next_increase = pacer.resume_at+8
                                     clean_parts = 0
                                 raise
                         break
@@ -160,19 +199,23 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
                         stats['retries'] = stats.get('retries', 0)+1
                         # Every range observes the same cooldown. Already written
                         # ranges stay intact; retry exactly the failed offset.
-                        pause_until = max(pause_until, time.monotonic()+wait)
+                        if rate_wait(error, retries-1) is None:
+                            pacer.pause(time.monotonic(), wait)
                         with contextlib.suppress(Exception):
                             await close_iterator(iterator)
                         iterator = iterator_at(offset, count-part)
                         started = False
                 stats['workers'] = limiter.limit()
                 stats['parts'] += 1
-                if began >= pause_until and temporary_limit < pool:
+                if began >= pacer.resume_at:
                     clean_parts += 1
                     if clean_parts * chunk >= 16*1024**2 and time.monotonic() >= next_increase:
-                        temporary_limit += 1
+                        temporary_limit = min(pool, temporary_limit + 1)
+                        pacer.recover()
                         clean_parts = 0
                         next_increase = time.monotonic()+8
+                stats['pace_ms'] = round(1000 * pacer.interval)
+                stats['cooldown_seconds'] = round(pacer.elapsed_cooldown(time.monotonic()), 2)
                 stats['wait_seconds'] += time.monotonic() - began
                 expected = min(chunk, size-offset)
                 if len(data) != expected:
@@ -217,4 +260,5 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
         await standard(mode='sdk_fallback')
     finally:
         if stats.get('transport') == transport:
+            stats['cooldown_seconds'] = round(pacer.elapsed_cooldown(time.monotonic()), 2)
             meter.finish()

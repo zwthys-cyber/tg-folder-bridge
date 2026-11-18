@@ -6,7 +6,21 @@ from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, Mock
 from telethon import TelegramClient, types
 from telethon.sessions import MemorySession
-from fast_download import DownloadCoverageError, download_file, wide_parts
+from fast_download import DownloadCoverageError, RequestPacer, download_file, wide_parts
+
+
+class Pacing(unittest.TestCase):
+    def test_late_errors_extend_cooldown_without_multiplying_pacing_backoff(self):
+        pacer = RequestPacer()
+        self.assertTrue(pacer.limited(10, 9, 2, pace=True))
+        self.assertFalse(pacer.limited(10.5, 9.5, 2, pace=True))
+        self.assertAlmostEqual(pacer.delay(11), 1.5)
+        self.assertAlmostEqual(pacer.elapsed_cooldown(11), 1.0)
+        self.assertEqual(pacer.delay(12.5), 0)
+        pacer.started(12.5)
+        self.assertAlmostEqual(pacer.delay(12.5), 0.10)
+        self.assertTrue(pacer.limited(13, 12.5, 1, pace=True))
+        self.assertAlmostEqual(pacer.interval, 0.12)
 
 
 class Iterator:
