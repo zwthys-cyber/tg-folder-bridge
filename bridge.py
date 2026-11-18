@@ -928,9 +928,10 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
             else:
                 stage = self.spool.stage(self.client, message, progress=self.progress(job, '下载'),
                     workers=self.download_workers, stats=job['download_stats'],
-                    worker_limit=lambda: self.worker_limit('下载'))
+                    worker_limit=lambda: self.worker_limit('下载'), checkpoint_scope=job['id'])
             async with stage as path:
-                self.store.record_transfer(job['id'], '下载', job['download_stats'])
+                phase = '复用已下载' if job['download_stats'].get('transport') == 'disk_checkpoint' else '下载'
+                self.store.record_transfer(job['id'], phase, job['download_stats'])
                 recorded = True
                 yield path
         except BaseException as exc:
@@ -1320,7 +1321,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
         def stage_ahead(message, stats, progress):
             stats['pipeline'] = True
             return self.spool.stage(self.client, message, progress=progress,
-                workers=min(8, self.download_workers), stats=stats)
+                workers=min(8, self.download_workers), stats=stats, checkpoint_scope=job['id'])
         pipeline = DownloadPipeline(plan, allowed, stage_ahead)
         if self.spool and not job.get('dedup_audit'):
             job['download_pipeline'] = pipeline

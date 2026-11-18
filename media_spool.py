@@ -1,12 +1,18 @@
-"""A single-file disk spool. Only this module's transfer-* directories are cleaned."""
+"""Bounded transfer spool and short-lived checkpoints of complete downloads."""
+import asyncio
 import fcntl
+import hashlib
 import io
+import os
 import re
 import shutil
 import tempfile
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from fast_download import DownloadPacingHistory, download_file
+from local_upload import DeliveryUnknownError
+from transport_recovery import rate_wait
 
 
 class InsufficientDiskError(RuntimeError):
@@ -41,6 +47,10 @@ class LimitedWriter(io.BufferedWriter):
 
 
 class MediaSpool:
+    checkpoint_minimum = 128 * 1024**2
+    checkpoint_lifetime = 24 * 60 * 60
+    checkpoint_limit = 2
+
     def __init__(self, root, max_bytes, reserve_bytes):
         if max_bytes <= 0 or reserve_bytes <= 0:
             raise ValueError('Spool limits must be positive')
@@ -51,6 +61,7 @@ class MediaSpool:
         self.max_bytes = max_bytes
         self.reserve_bytes = reserve_bytes
         self.download_pacing = DownloadPacingHistory()
+        self.in_use = set()
         self.lock = (self.root / '.lock').open('a')
         try:
             fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -65,6 +76,7 @@ class MediaSpool:
                     child.unlink()
                 elif child.is_dir():
                     shutil.rmtree(child)
+            self.prune_checkpoints()
         except BaseException:
             self.close()
             raise
@@ -73,19 +85,83 @@ class MediaSpool:
         if not self.lock.closed:
             self.lock.close()
 
+    def prune_checkpoints(self, for_new=False, evict_unused=False):
+        candidates = []
+        now = time.time()
+        for child in self.root.glob('ready-*'):
+            if child in self.in_use or not re.fullmatch(r'ready-[0-9a-f]{64}', child.name):
+                continue
+            if child.is_symlink() or not child.is_dir():
+                child.unlink()
+                continue
+            age = now - child.stat().st_mtime
+            if age >= self.checkpoint_lifetime:
+                shutil.rmtree(child)
+            else:
+                candidates.append((age, child))
+        slots = 0 if evict_unused else max(0, self.checkpoint_limit - len(self.in_use) - int(for_new))
+        for _, child in sorted(candidates)[slots:]:
+            shutil.rmtree(child)
+
+    def checkpoint_directory(self, scope, message, size):
+        identifier = getattr(getattr(message, 'document', None), 'id', None)
+        if not scope or not identifier or size is None or size < self.checkpoint_minimum:
+            return None
+        key = (scope, message.chat_id, message.id, identifier, size)
+        digest = hashlib.sha256(repr(key).encode()).hexdigest()
+        path = self.root / ('ready-' + digest)
+        return path if path not in self.in_use else None
+
+    @staticmethod
+    def sync_file(path):
+        with path.open('rb') as stream:
+            os.fsync(stream.fileno())
+
     @asynccontextmanager
-    async def stage(self, client, message, progress=None, workers=1, stats=None, worker_limit=None):
+    async def held_checkpoint(self, directory, name):
+        self.in_use.add(directory)
+        preserve = False
+        try:
+            yield directory / name
+        except BaseException as error:
+            preserve = (isinstance(error, (ConnectionError, asyncio.TimeoutError, asyncio.CancelledError,
+                                           DeliveryUnknownError))
+                        or rate_wait(error, 0) is not None)
+            raise
+        finally:
+            self.in_use.remove(directory)
+            if not preserve:
+                shutil.rmtree(directory)
+
+    @asynccontextmanager
+    async def stage(self, client, message, progress=None, workers=1, stats=None,
+                    worker_limit=None, checkpoint_scope=None):
         size = getattr(getattr(message, 'file', None), 'size', None)
         if size is not None and size > self.max_bytes:
             raise MediaTooLargeError('Media exceeds configured limit')
-        required = size if size is not None else self.max_bytes
-        if shutil.disk_usage(self.root).free < required + self.reserve_bytes:
-            raise InsufficientDiskError('Not enough free disk space')
         suffix = getattr(getattr(message, 'file', None), 'ext', '') or ''
         if not re.fullmatch(r'\.[A-Za-z0-9]{1,12}', suffix):
             suffix = '.jpg' if message.photo else '.bin'
+        name = 'media' + suffix
+        checkpoint = self.checkpoint_directory(checkpoint_scope, message, size)
+        self.prune_checkpoints()
+        if checkpoint and checkpoint.is_dir():
+            saved = checkpoint / name
+            if saved.is_file() and not saved.is_symlink() and saved.stat().st_size == size:
+                if stats is not None:
+                    stats.update(transport='disk_checkpoint', bytes=size, total=size)
+                async with self.held_checkpoint(checkpoint, name) as path:
+                    yield path
+                return
+            shutil.rmtree(checkpoint)
+        required = size if size is not None else self.max_bytes
+        if shutil.disk_usage(self.root).free < required + self.reserve_bytes:
+            if checkpoint:
+                self.prune_checkpoints(evict_unused=True)
+            if not checkpoint or shutil.disk_usage(self.root).free < required + self.reserve_bytes:
+                raise InsufficientDiskError('Not enough free disk space')
         with tempfile.TemporaryDirectory(prefix='transfer-', dir=self.root) as directory:
-            path = Path(directory) / ('media' + suffix)
+            path = Path(directory) / name
             path.touch(mode=0o600, exist_ok=False)
             raw = path.open('wb', buffering=0)
             with LimitedWriter(raw, self.root, self.max_bytes, self.reserve_bytes) as stream:
@@ -95,6 +171,14 @@ class MediaSpool:
             actual = path.stat().st_size
             if actual == 0 or (size is not None and size > 0 and actual != size):
                 raise IncompleteMediaError('Downloaded media size does not match')
-            # The caller uploads and awaits receipt while the context stays alive.
-            # Success, exception, timeout, or cancellation all unlink the file.
-            yield path
+            if checkpoint and len(self.in_use) < self.checkpoint_limit:
+                await asyncio.to_thread(self.sync_file, path)
+            if (checkpoint and not checkpoint.exists()
+                    and len(self.in_use) < self.checkpoint_limit):
+                self.prune_checkpoints(for_new=True)
+                os.utime(directory, None)
+                Path(directory).rename(checkpoint)
+                async with self.held_checkpoint(checkpoint, name) as saved:
+                    yield saved
+            else:
+                yield path

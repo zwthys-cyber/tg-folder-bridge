@@ -38,6 +38,7 @@ class DownloadPipeline:
         use_stats(slot['stats'])
         slot['callback'] = progress
         entered = False
+        released = False
         try:
             path = await slot['task']
             entered = True
@@ -47,11 +48,18 @@ class DownloadPipeline:
                 if self.contains(following):
                     self.pending = self._start(following)
             yield path
+        except BaseException as error:
+            if entered:
+                released = True
+                # The spool needs to distinguish an interrupted upload from
+                # normal consumption or unused look-ahead cleanup.
+                await slot['context'].__aexit__(type(error), error, error.__traceback__)
+            raise
         finally:
             slot['callback'] = None
-            if entered:
+            if entered and not released:
                 await slot['context'].__aexit__(None, None, None)
-            else:
+            elif not entered:
                 if not slot['task'].done():
                     slot['task'].cancel()
                 result = (await asyncio.gather(slot['task'], return_exceptions=True))[0]

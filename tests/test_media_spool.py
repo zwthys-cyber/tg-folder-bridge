@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, patch
+from download_pipeline import DownloadPipeline
 from media_spool import (MediaSpool, InsufficientDiskError, MediaTooLargeError,
                          IncompleteMediaError, SpoolBusyError)
 
@@ -21,6 +22,48 @@ class Spool(unittest.IsolatedAsyncioTestCase):
 
     def assert_empty(self):
         self.assertEqual(list(self.root.glob('transfer-*')), [])
+
+    async def test_pipeline_retry_after_restart_reuses_complete_file_and_removes_it_after_receipt(self):
+        self.message.chat_id, self.message.id, self.message.document = 1, 2, NS(id=3)
+
+        async def download(message, file):
+            file.write(b'data')
+
+        client = NS(download_media=AsyncMock(side_effect=download))
+
+        def stage(message, stats, progress):
+            return self.spool.stage(client, message, stats=stats, checkpoint_scope='job')
+
+        with patch.object(MediaSpool, 'checkpoint_minimum', 1):
+            pipeline = DownloadPipeline([self.message], {(1, 2)}, stage)
+            with self.assertRaises(ConnectionError):
+                async with pipeline.stage(self.message, lambda stats: None, None):
+                    raise ConnectionError('upload connection interrupted')
+            await pipeline.close()
+            [ready] = self.root.glob('ready-*')
+            self.spool.close()
+            self.spool = MediaSpool(self.root, 16, 1)
+            stats = {}
+            async with self.spool.stage(client, self.message, stats=stats, checkpoint_scope='job') as path:
+                self.assertEqual(path.read_bytes(), b'data')
+                self.assertEqual(path.parent, ready)
+                self.assertEqual(stats['transport'], 'disk_checkpoint')
+            client.download_media.assert_awaited_once()
+            self.assertFalse(ready.exists())
+
+    async def test_partial_download_does_not_create_checkpoint(self):
+        self.message.chat_id, self.message.id, self.message.document = 1, 2, NS(id=3)
+
+        async def download(message, file):
+            file.write(b'pa')
+            raise ConnectionError('download connection interrupted')
+
+        with patch.object(MediaSpool, 'checkpoint_minimum', 1):
+            with self.assertRaises(ConnectionError):
+                async with self.spool.stage(NS(download_media=download), self.message, checkpoint_scope='job'):
+                    self.fail('partial file must not be yielded')
+        self.assertEqual(list(self.root.glob('ready-*')), [])
+        self.assert_empty()
 
     async def test_file_survives_until_upload_confirmed_then_is_deleted(self):
         async def download(message, file):

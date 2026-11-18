@@ -20,6 +20,7 @@ def reset(root, apply=False):
         if not apply:
             return result
         spool = MediaSpool(root / 'spool', 4 * 1024**3, 10 * 1024**3)
+        spool.prune_checkpoints(evict_unused=True)
         backup_dir = root / 'reset-backups'
         backup_dir.mkdir(mode=0o700, exist_ok=True)
         backup_path = backup_dir / ('index-' + uuid.uuid4().hex + '.sqlite3')
