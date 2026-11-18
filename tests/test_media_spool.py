@@ -37,7 +37,8 @@ class Spool(unittest.IsolatedAsyncioTestCase):
         with patch.object(MediaSpool, 'checkpoint_minimum', 1):
             pipeline = DownloadPipeline([self.message], {(1, 2)}, stage)
             with self.assertRaises(ConnectionError):
-                async with pipeline.stage(self.message, lambda stats: None, None):
+                async with pipeline.stage(self.message, lambda stats: None, None) as path:
+                    (path.parent / 'preview.jpg').write_bytes(b'old preview')
                     raise ConnectionError('upload connection interrupted')
             await pipeline.close()
             [ready] = self.root.glob('ready-*')
@@ -47,6 +48,7 @@ class Spool(unittest.IsolatedAsyncioTestCase):
             async with self.spool.stage(client, self.message, stats=stats, checkpoint_scope='job') as path:
                 self.assertEqual(path.read_bytes(), b'data')
                 self.assertEqual(path.parent, ready)
+                self.assertFalse((ready / 'preview.jpg').exists())
                 self.assertEqual(stats['transport'], 'disk_checkpoint')
             client.download_media.assert_awaited_once()
             self.assertFalse(ready.exists())

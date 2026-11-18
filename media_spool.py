@@ -148,6 +148,10 @@ class MediaSpool:
         if checkpoint and checkpoint.is_dir():
             saved = checkpoint / name
             if saved.is_file() and not saved.is_symlink() and saved.stat().st_size == size:
+                # Rendered previews may have been left by the interrupted
+                # attempt. Rebuild them from the original for this delivery.
+                for auxiliary in ('preview.jpg', 'thumbnail.jpg'):
+                    (checkpoint / auxiliary).unlink(missing_ok=True)
                 if stats is not None:
                     stats.update(transport='disk_checkpoint', bytes=size, total=size)
                 async with self.held_checkpoint(checkpoint, name) as path:
