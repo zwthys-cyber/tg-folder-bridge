@@ -639,17 +639,30 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bridge.worker_limit('下载'), 4)
         self.assertEqual(self.bridge.worker_limit('上传'), 3)
 
-    async def test_429_keeps_auto_mode_but_reduces_its_ceiling(self):
+    async def test_429_keeps_limits_and_only_reduces_active_window(self):
         from telethon.errors import InvalidBufferError
         from transfer_settings import automatic
         self.bridge.automatic_speed = True
         self.bridge.download_workers = self.bridge.upload_workers = 32
         self.bridge.tuners['上传'].current = 24
+        self.job['phase'] = '上传'
         error = InvalidBufferError((-429).to_bytes(4, 'little', signed=True))
         self.assertTrue(self.bridge.defer_transport(error, 0))
         self.assertTrue(automatic(self.bridge.settings_file))
         self.assertLessEqual(self.bridge.worker_limit('上传'), 8)
+        self.assertEqual((self.bridge.download_workers, self.bridge.upload_workers), (32, 32))
         self.assertGreater(self.bridge.cooldown.remaining(), 100)
+
+    async def test_source_flood_wait_does_not_permanently_degrade_media_settings(self):
+        from telethon.errors import FloodWaitError
+        from transfer_settings import save
+        self.bridge.download_workers, self.bridge.upload_workers = 8, 4
+        save(self.bridge.settings_file, 8, 4, False, 1)
+        original = self.bridge.settings_file.read_bytes()
+        self.job['phase'] = '获取文件列表'
+        self.assertTrue(self.bridge.defer_transport(FloodWaitError(None, capture=1), 0))
+        self.assertEqual(self.bridge.settings_file.read_bytes(), original)
+        self.assertEqual((self.bridge.download_workers, self.bridge.upload_workers), (8, 4))
 
     async def test_progress_feeds_only_its_direction_before_display_throttling(self):
         from unittest.mock import Mock
@@ -697,7 +710,7 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         await self.bridge.collect_with_recovery('link', self.job)
         self.assertEqual(operations, ['job', 'job'])
         self.assertGreater(gates[1], 100)
-        self.assertEqual((self.bridge.download_workers, self.bridge.upload_workers), (32, 8))
+        self.assertEqual((self.bridge.download_workers, self.bridge.upload_workers), (32, 32))
         self.bridge.client.disconnect.assert_awaited_once()
         self.bridge.connect_user.assert_awaited_once()
         self.assertFalse(self.bridge.blocked)
@@ -709,7 +722,7 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         self.bridge.upload_connections = 2
         self.job['phase'] = '下载'
         self.bridge.defer_transport(InvalidBufferError((-429).to_bytes(4, 'little', signed=True)), 0)
-        self.assertEqual(self.bridge.download_workers, 8)
+        self.assertEqual(self.bridge.download_workers, 32)
         self.assertEqual(self.bridge.upload_workers, 8)
         self.assertEqual(self.bridge.upload_connections, 2)
         import transfer_settings

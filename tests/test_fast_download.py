@@ -3,7 +3,7 @@ import io
 import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace as NS
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 from telethon import TelegramClient, types
 from telethon.sessions import MemorySession
 from fast_download import DownloadCoverageError, download_file
@@ -33,6 +33,34 @@ class Iterator:
 
 
 class Downloads(unittest.IsolatedAsyncioTestCase):
+    async def test_flood_wait_retries_failed_offset_without_discarding_saved_ranges(self):
+        from telethon.errors import FloodWaitError
+        data = bytes(range(256)) * 45000
+        offsets, iterators, failed = [], [], False
+        def iterate(message, **kwargs):
+            kwargs.pop('request_size'); kwargs.pop('file_size')
+            offsets.append(kwargs['offset'])
+            iterator = Iterator(data, **kwargs)
+            original = iterator.__anext__
+            async def read():
+                nonlocal failed
+                if iterator.offset == 4*1024**2 and not failed:
+                    failed = True
+                    raise FloodWaitError(request=None, capture=1)
+                return await original()
+            iterator.__anext__ = read
+            iterators.append(iterator)
+            return iterator
+        stats, output = {}, io.BytesIO()
+        with patch('fast_download.asyncio.sleep', new=AsyncMock()):
+            await download_file(NS(iter_download=iterate), NS(document=True,
+                file=NS(size=len(data))), output, workers=4, stats=stats)
+        self.assertEqual(output.getvalue(), data)
+        self.assertEqual(stats['retries'], 1)
+        self.assertIn(4*1024**2, offsets)
+        self.assertEqual(offsets.count(0), 1)
+        self.assertTrue(all(it.closed for it in iterators))
+
     async def test_real_sdk_iterators_cover_all_ranges_with_a_short_final_chunk(self):
         data = bytes(range(256)) * 45000 + b'last bytes'
         document = types.Document(id=123, access_hash=456, file_reference=b'ref',

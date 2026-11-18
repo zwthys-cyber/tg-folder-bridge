@@ -1,8 +1,10 @@
 """Bounded parallel ranges of one document using Telethon's public iterator."""
 import asyncio
 import time
+import contextlib
 from contextlib import asynccontextmanager
 from transfer_metrics import TransferMeter
+from transport_recovery import rate_wait
 
 
 class LiveLimiter:
@@ -61,29 +63,52 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
     stride = pool * chunk
     limiter = LiveLimiter(worker_limit or (lambda: workers), pool)
     completed = 0
+    pause_until = 0.0
     stats.update(mode='parallel', workers=limiter.limit(), parts=0, wait_seconds=0.0)
     meter = TransferMeter(stats, size, transport='sdk_ranges')
 
     async def download_range(index):
-        nonlocal completed
+        nonlocal completed, pause_until
         offset = index * chunk
         count = (size - offset + stride - 1) // stride
-        iterator = client.iter_download(message, offset=offset, stride=stride,
-                                        limit=count, chunk_size=chunk,
-                                        request_size=chunk, file_size=size)
+        def iterator_at(position, remaining):
+            return client.iter_download(message, offset=position, stride=stride,
+                limit=remaining, chunk_size=chunk, request_size=chunk, file_size=size)
+        iterator = iterator_at(offset, count)
         started = False
         try:
-            for _ in range(count):
-                async with limiter.slot():
-                    began = time.monotonic()
+            for part in range(count):
+                retries = 0
+                while True:
+                    delay = pause_until-time.monotonic()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
                     try:
-                        started = True
-                        data = await iterator.__anext__()
+                        async with limiter.slot():
+                            began = time.monotonic()
+                            started = True
+                            data = await iterator.__anext__()
+                        break
                     except StopAsyncIteration:
                         raise DownloadCoverageError('Download range ended early') from None
-                    stats['workers'] = limiter.limit()
-                    stats['parts'] += 1
-                    stats['wait_seconds'] += time.monotonic() - began
+                    except Exception as error:
+                        wait = rate_wait(error, retries)
+                        if wait is None and isinstance(error, (ConnectionError, asyncio.TimeoutError)):
+                            wait = min(2**retries, 15)
+                        if wait is None or retries >= 3:
+                            raise
+                        retries += 1
+                        stats['retries'] = stats.get('retries', 0)+1
+                        # Every range observes the same cooldown. Already written
+                        # ranges stay intact; retry exactly the failed offset.
+                        pause_until = max(pause_until, time.monotonic()+wait)
+                        with contextlib.suppress(Exception):
+                            await iterator.close()
+                        iterator = iterator_at(offset, count-part)
+                        started = False
+                stats['workers'] = limiter.limit()
+                stats['parts'] += 1
+                stats['wait_seconds'] += time.monotonic() - began
                 expected = min(chunk, size-offset)
                 if len(data) != expected:
                     raise DownloadCoverageError('Download chunk size does not match')

@@ -14,6 +14,7 @@ from telegram.ext import ApplicationHandlerStop, CallbackQueryHandler, CommandHa
 from telethon import TelegramClient, events, types
 from core import Store, folder_title, folder_metadata, source_entry, media_count, media_key, pagination_marker, parse_link
 from media_spool import MediaSpool
+from download_pipeline import DownloadPipeline
 from previews import document_thumbnail, make_jpeg_preview
 from fast_upload import upload_file
 from catalog_ui import catalog_page, send_file_page, send_folder_card, favorite_button, resource_summary
@@ -33,7 +34,7 @@ from delivery import WholeDelivery
 from notifications import Notifications
 import automation_control
 
-VERSION = '0.11.0'
+VERSION = '0.12.0'
 
 
 class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
@@ -776,15 +777,11 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 self.cooldown.defer(wait, error_detail(error))
                 return True
             phase = (self.active or {}).get('phase', '')
-            if phase != '上传':
-                self.download_workers = max(1, min(8, self.download_workers // 2))
-                self.tuners['下载'].configure(self.download_workers)
-            if phase != '下载':
-                self.upload_workers = max(1, min(8, self.upload_workers // 2))
-                self.upload_connections = 1
-                self.tuners['上传'].configure(self.upload_workers)
-            transfer_settings.save(self.settings_file, self.download_workers, self.upload_workers,
-                                   self.automatic_speed, self.upload_connections)
+            # A source-list FloodWait is unrelated to media throughput. Back off
+            # the active window, never overwrite the user's persistent limits.
+            if phase in self.tuners:
+                tuner = self.tuners[phase]
+                tuner.current = max(1, min(8, tuner.current // 2))
             self.cooldown.defer(wait, error_detail(error))
         elif not self.cooldown.remaining():
             self.cooldown.defer(5 * 2**attempt, error_detail(error))
@@ -922,9 +919,15 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
     async def staged_download(self, message, job):
         recorded = False
         try:
-            async with self.spool.stage(self.client, message, progress=self.progress(job, '下载'),
+            pipeline = job.get('download_pipeline')
+            if pipeline and pipeline.contains(message):
+                stage = pipeline.stage(message,
+                    lambda stats: job.__setitem__('download_stats', stats), self.progress(job, '下载'))
+            else:
+                stage = self.spool.stage(self.client, message, progress=self.progress(job, '下载'),
                     workers=self.download_workers, stats=job['download_stats'],
-                    worker_limit=lambda: self.worker_limit('下载')) as path:
+                    worker_limit=lambda: self.worker_limit('下载'))
+            async with stage as path:
                 self.store.record_transfer(job['id'], '下载', job['download_stats'])
                 recorded = True
                 yield path
@@ -941,13 +944,13 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
             nonlocal last_update
             direction = '下载' if label == '下载' else '上传'
             metrics = job.get('download_stats' if direction == '下载' else 'upload_stats', {})
-            if self.automatic_speed and metrics.get('parts'):
+            if self.automatic_speed and metrics.get('parts') and not metrics.get('pipeline'):
                 self.tuners[direction].observe(current, total, metrics['parts'])
             now = time.monotonic()
             if now - last_update < 3 and (not total or current < total):
                 return
             last_update = now
-            elapsed = max(now - started, 0.01)
+            elapsed = max(now - started, metrics.get('seconds', 0), 0.01)
             rate = current / elapsed
             total_text = f'{total / 1024**2:.1f} MiB' if total else '未知'
             percent = f'{current / total:.1%}' if total else ''
@@ -966,13 +969,13 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 detail += f"\n上传并发 {metrics.get('workers', 1)} 路"
                 if metrics.get('parts'):
                     detail += f"；分块平均等待 {1000 * metrics['wait_seconds'] / metrics['parts']:.0f} ms"
-            if self.automatic_speed and metrics.get('parts'):
+            if self.automatic_speed and metrics.get('parts') and not metrics.get('pipeline'):
                 detail += f'\n自动调速：{self.tuners[direction].note}；下一批并发 {self.worker_limit(direction)} 路'
             if metrics.get('recent_seconds', 0) > 0:
                 detail += (f"\n近期 {metrics['recent_seconds']:.1f} 秒：{metrics.get('recent_mib', 0):.2f} MiB/s"
                            f"；{metrics.get('connections', 1)} 条连接（{metrics.get('transport', 'sdk')}）")
             if metrics.get('retries'):
-                detail += f"\n短暂断线已重连 {metrics['retries']} 次，保留已确认分块。"
+                detail += f"\n分块已重试 {metrics['retries']} 次，保留已完成部分。"
             if job.get('audit_total'):
                 detail += f"\n内容核验 {job.get('audit_index', 0)} / {job['audit_total']}；确认重复后只合并索引。"
             self.store.update(job['id'], 'running', job['expected'], detail)
@@ -1273,44 +1276,60 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
         # Upload in the same source order used for browsing. Native-video
         # preference belongs to duplicate selection, not transfer scheduling.
         job['audit_total'] = len(plan)
-        for index, message in enumerate(plan, 1):
-            job['audit_index'] = index
-            key = (message.chat_id, message.id)
-            previous_key = key if key in remaining else next(
-                (source for source, row in remaining.items()
-                 if media_key(message) and row.get('media_key') == media_key(message)), None)
-            previous = remaining.pop(previous_key) if previous_key is not None else None
-            if previous:
-                if previous.get('is_alias'):
-                    continue
-                if job.get('dedup_audit'):
-                    if not previous.get('content_sha256'):
-                        await self.transfer_media(message, previous_key, job, existing=previous)
-                    else:
-                        # A restart can occur after persisting a fingerprint
-                        # but before merging its index row. Finish that merge
-                        # without downloading or uploading the original again.
-                        import json
-                        duplicate = self.store.duplicate(job['id'], previous_key, previous)
-                        if duplicate:
-                            other = (duplicate['source_chat'], duplicate['source_message'])
-                            if preference(json.loads(previous['quality_json'])) > preference(json.loads(duplicate['quality_json'])):
-                                self.store.merge_alias(job['id'], other, previous_key, duplicate.get('media_key', ''))
-                            else:
-                                self.store.merge_alias(job['id'], previous_key, other, previous.get('media_key', ''))
-                    continue
-                ext = getattr(getattr(message, 'file', None), 'ext', '') or ''
-                if self.transfer_mode == 'download_upload' and self.heic_previews and ext.lower() in {'.heic', '.heif'}:
-                    if self.document_groups and not previous.get('has_thumbnail'):
-                        await self.transfer_media(message, previous_key, job, replace_original=True)
-                    elif not self.document_groups and not previous.get('preview_file_id'):
-                        await self.transfer_media(message, previous_key, job, preview_only=True)
-            else:
-                if job.get('dedup_audit'):
-                    job['audit_unmatched'] = True
-                    continue
-                await self.transfer_media(message, key, job)
-            await asyncio.sleep(self.transfer_pause)
+        # Prefetch only consecutive unsaved sources. Repairs/audits keep the
+        # conservative serial path; Telegram sends and receipt commits stay serial.
+        saved_media = {row.get('media_key') for row in remaining.values() if row.get('media_key')}
+        allowed = {(m.chat_id, m.id) for m in plan
+                   if (m.chat_id, m.id) not in remaining and media_key(m) not in saved_media}
+        def stage_ahead(message, stats, progress):
+            stats['pipeline'] = True
+            return self.spool.stage(self.client, message, progress=progress,
+                workers=min(8, self.download_workers), stats=stats)
+        pipeline = DownloadPipeline(plan, allowed, stage_ahead)
+        if self.spool and not job.get('dedup_audit'):
+            job['download_pipeline'] = pipeline
+        try:
+            for index, message in enumerate(plan, 1):
+                job['audit_index'] = index
+                key = (message.chat_id, message.id)
+                previous_key = key if key in remaining else next(
+                    (source for source, row in remaining.items()
+                     if media_key(message) and row.get('media_key') == media_key(message)), None)
+                previous = remaining.pop(previous_key) if previous_key is not None else None
+                if previous:
+                    if previous.get('is_alias'):
+                        continue
+                    if job.get('dedup_audit'):
+                        if not previous.get('content_sha256'):
+                            await self.transfer_media(message, previous_key, job, existing=previous)
+                        else:
+                            # A restart can occur after persisting a fingerprint
+                            # but before merging its index row. Finish that merge
+                            # without downloading or uploading the original again.
+                            import json
+                            duplicate = self.store.duplicate(job['id'], previous_key, previous)
+                            if duplicate:
+                                other = (duplicate['source_chat'], duplicate['source_message'])
+                                if preference(json.loads(previous['quality_json'])) > preference(json.loads(duplicate['quality_json'])):
+                                    self.store.merge_alias(job['id'], other, previous_key, duplicate.get('media_key', ''))
+                                else:
+                                    self.store.merge_alias(job['id'], previous_key, other, previous.get('media_key', ''))
+                        continue
+                    ext = getattr(getattr(message, 'file', None), 'ext', '') or ''
+                    if self.transfer_mode == 'download_upload' and self.heic_previews and ext.lower() in {'.heic', '.heif'}:
+                        if self.document_groups and not previous.get('has_thumbnail'):
+                            await self.transfer_media(message, previous_key, job, replace_original=True)
+                        elif not self.document_groups and not previous.get('preview_file_id'):
+                            await self.transfer_media(message, previous_key, job, preview_only=True)
+                else:
+                    if job.get('dedup_audit'):
+                        job['audit_unmatched'] = True
+                        continue
+                    await self.transfer_media(message, key, job)
+                await asyncio.sleep(self.transfer_pause)
+        finally:
+            job.pop('download_pipeline', None)
+            await pipeline.close()
         if job.get('dedup_audit') and any(not row.get('content_sha256') for row in self.store.files(job['id'])):
             # Existing saved rows do not prove this audit actually inspected
             # all originals when a source batch stops arriving prematurely.
