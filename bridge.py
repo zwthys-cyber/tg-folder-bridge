@@ -30,14 +30,13 @@ from source_lock import source_lease
 from operations import Operations
 from browse_navigation import BrowseNavigation
 from delivery import WholeDelivery
-from capture_backfill import CaptureBackfill
 from notifications import Notifications
 import automation_control
 
-VERSION = '0.10.1'
+VERSION = '0.11.0'
 
 
-class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill, Notifications):
+class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
     def __init__(self):
         self.owners = {int(x) for x in os.environ['OWNER_IDS'].split(',') if x.strip()}
         self.relay_id = int(os.environ['RELAY_USER_ID'])
@@ -104,7 +103,6 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill, Notif
         self.pending_jumps = {}
         self.retry_worker = None
         self.delivery_worker = None
-        self.capture_worker = None
         self.notice_worker = None
 
     def install(self, app):
@@ -166,7 +164,6 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill, Notif
         self.recovery_worker = asyncio.create_task(self.restore_jobs())
         self.retry_worker = asyncio.create_task(self.retry_loop())
         self.delivery_worker = asyncio.create_task(self.delivery_loop())
-        self.capture_worker = asyncio.create_task(self.capture_loop())
         self.notice_worker = asyncio.create_task(self.notice_loop())
 
     async def restore_jobs(self):
@@ -410,8 +407,6 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill, Notif
                 print('文件夹封面暂不可用：' + type(exc).__name__, flush=True)
         reply = await send_folder_card(bot, chat, job, items, photo,
                                        favorite=self.store.is_favorite(chat,job['id']))
-        with self.store.db:
-            self.store.db.execute('INSERT OR REPLACE INTO capture_priorities VALUES(?,?)',(job['id'],time.time()))
         if photo and getattr(reply, 'photo', None):
             self.store.set_cover(job['id'], reply.photo[-1].file_id)
 
@@ -420,10 +415,6 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill, Notif
             self.notice_worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self.notice_worker
-        if self.capture_worker:
-            self.capture_worker.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self.capture_worker
         if self.delivery_worker:
             self.delivery_worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -1319,7 +1310,6 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, CaptureBackfill, Notif
                     job['audit_unmatched'] = True
                     continue
                 await self.transfer_media(message, key, job)
-            await self.capture_between_files(job)
             await asyncio.sleep(self.transfer_pause)
         if job.get('dedup_audit') and any(not row.get('content_sha256') for row in self.store.files(job['id'])):
             # Existing saved rows do not prove this audit actually inspected

@@ -197,6 +197,9 @@ class Store:
                                   ('capture_version','INTEGER DEFAULT 0'),
                                   ('capture_timezone_assumed','INTEGER DEFAULT 1')):
             if column not in columns:self.db.execute(f'ALTER TABLE files ADD COLUMN {column} {definition}')
+        plan_columns={r['name'] for r in self.db.execute('PRAGMA table_info(source_plans)')}
+        if 'media_keys' not in plan_columns:
+            self.db.execute("ALTER TABLE source_plans ADD COLUMN media_keys TEXT DEFAULT ''")
         job_columns = {x['name'] for x in self.db.execute('PRAGMA table_info(jobs)')}
         if 'title' not in job_columns:
             self.db.execute("ALTER TABLE jobs ADD COLUMN title TEXT DEFAULT ''")
@@ -332,9 +335,11 @@ class Store:
 
     def save_source_plan(self,job,messages):
         import json
+        messages=list(messages)
         with self.db:
-            self.db.execute('INSERT OR REPLACE INTO source_plans VALUES(?,?)',
-                            (job,json.dumps([(m.chat_id,m.id) for m in messages])))
+            self.db.execute('INSERT OR REPLACE INTO source_plans(job,payload,media_keys) VALUES(?,?,?)',
+                            (job,json.dumps([(m.chat_id,m.id) for m in messages]),
+                             json.dumps([media_key(m) for m in messages])))
 
     def set_folder_metadata(self, job, metadata):
         for field in ('source_created_at', 'source_updated_at'):
@@ -396,6 +401,17 @@ class Store:
         return dict(row) if row else None
 
     def processed_count(self, job):
+        import json
+        plan=self.db.execute('SELECT payload,media_keys FROM source_plans WHERE job=?',(job,)).fetchone()
+        expected=self.get(job)['expected']
+        if plan and plan['media_keys']:
+            entries=json.loads(plan['payload']);keys=json.loads(plan['media_keys'])
+            if len(entries)==expected and len(keys)==len(entries):
+                saved=self.resume_entries(job)
+                sources={(r['source_chat'],r['source_message']) for r in saved}
+                media={r['media_key'] for r in saved if r['media_key']}
+                return sum(tuple(source) in sources or bool(key and key in media)
+                           for source,key in zip(entries,keys))
         return len(self.files(job)) + self.db.execute('SELECT count(*) FROM file_aliases WHERE job=?', (job,)).fetchone()[0]
 
     def resume_entries(self, job):

@@ -30,22 +30,22 @@ class Dates(unittest.TestCase):
         self.assertEqual(from_probe({'format':{'tags':{'creation_time':'1904-01-01T00:00:00Z'}}}),{})
         self.assertEqual(normalize('2026:99:23 00:00:00','exif.DateTimeOriginal'),{})
 
-    def test_user_dates_descend_within_each_type_and_unknowns_keep_source_order(self):
+    def test_legacy_dates_do_not_affect_display_source_order(self):
         dates=['2026-10-06T00:00:00Z','2025-05-04T00:00:00Z','2026-10-23T00:00:00Z','2026-10-17T00:00:00Z']
         items=[dict(kind=k,file_id=f'{k}{i}',captured_at=d,capture_time_source='exif.DateTimeOriginal')
                for k in ('video','document') for i,d in enumerate(dates)]
         items += [dict(kind='document',file_id='unknown1',source_name='20261025.mp4'),
                   dict(kind='document',file_id='unknown2',upload_date='2026-11-17')]
         ordered=display_order(items)
-        self.assertEqual([x['file_id'] for x in ordered],['document2','document3','document0','document1',
-            'unknown1','unknown2','video2','video3','video0','video1'])
+        self.assertEqual([x['file_id'] for x in ordered],['document0','document1','document2','document3',
+            'unknown1','unknown2','video0','video1','video2','video3'])
         self.assertEqual(items[0]['file_id'],'video0')
 
     def test_export_time_is_diagnostic_only_and_never_used_for_capture_order(self):
         weak=dict(kind='video',file_id='export',captured_at='2026-11-17T00:00:00Z',capture_time_source='video.creation_time')
         original=dict(kind='video',file_id='camera',captured_at='2025-05-04T00:00:00Z',capture_time_source='video.com.apple.quicktime.creationdate')
         self.assertIsNone(epoch(weak))
-        self.assertEqual([r['file_id'] for r in display_order([weak,original])],['camera','export'])
+        self.assertEqual([r['file_id'] for r in display_order([weak,original])],['export','camera'])
 
     def test_exiftool_subsecond_xmp_and_gps_tags_ignore_file_timestamps(self):
         result=from_exiftool({'File:FileModifyDate':'2026:11:17 00:00:00+00:00',

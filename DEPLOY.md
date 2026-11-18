@@ -1,4 +1,4 @@
-# 部署与接入（0.10.0）
+# 部署与接入（0.11.0）
 
 ## 获取代码与选择模式
 
@@ -27,7 +27,7 @@ sudo -u tgbridge nano .env
 sudo -u tgbridge .venv/bin/python login.py
 ```
 
-填写真实配置并核对用户 ID。默认是云端 API、forward、relay；需要逐文件下载上传时显式配置，见 [TRANSFER.md](TRANSFER.md)。Debian/Ubuntu 安装完整元数据引擎：`apt-get install -y --no-install-recommends ffmpeg libimage-exiftool-perl`。原始拍摄日期识别和旧文件补读见 [CAPTURE_TIME.md](CAPTURE_TIME.md)，用户主动订阅的新文件夹通知见 [NOTIFICATIONS.md](NOTIFICATIONS.md)。缩略图还可使用 imageio-ffmpeg 自带的 ffmpeg。
+填写真实配置并核对用户 ID。默认是云端 API、forward、relay；需要逐文件下载上传时显式配置，见 [TRANSFER.md](TRANSFER.md)。内容核验使用 FFprobe，Debian/Ubuntu 可安装 `ffmpeg`；拍摄日期识别与补读已停用，不要求安装 ExifTool。发送顺序见 [CAPTURE_TIME.md](CAPTURE_TIME.md)，更新通知见 [NOTIFICATIONS.md](NOTIFICATIONS.md)。缩略图还可使用 imageio-ffmpeg 自带的 ffmpeg。
 
 独立服务模板位于 `deploy/tg-folder-bridge.service`：
 

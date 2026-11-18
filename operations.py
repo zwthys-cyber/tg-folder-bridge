@@ -13,6 +13,7 @@ from telegram.ext import ApplicationHandlerStop
 from core import parse_link
 import automation_control as control
 from menu_actions import menu_guard, retire_menu
+from transport_recovery import rate_wait
 
 FAILURES = {'failed', 'partial', 'needs_review', 'blocked', 'interrupted'}
 TRANSIENT = {'ConnectionError', 'TimeoutError', 'OSError', 'URLError', 'ServerError', 'TimedOut', 'NetworkError'}
@@ -65,14 +66,6 @@ class Operations:
         deliveries=dict(self.store.db.execute('SELECT state,count(*) FROM deliveries GROUP BY state'))
         lines.append(f"用户内容发送：排队 {deliveries.get('queued',0)}，运行 {deliveries.get('running',0)}，"
                      f"停止 {deliveries.get('paused',0)}，待确认 {deliveries.get('uncertain',0)}")
-        from capture_time import original_source,VERSION
-        dates=self.store.db.execute('SELECT captured_at,capture_time_source FROM files').fetchall()
-        original=sum(bool(r[0]) and original_source(r[1]) for r in dates)
-        creation=sum(bool(r[0]) and not original_source(r[1]) for r in dates)
-        pending=self.store.db.execute("SELECT count(*) FROM files WHERE capture_version<? AND job IN "
-            "(SELECT id FROM jobs WHERE state='complete' OR audit_public=1)",(VERSION,)).fetchone()[0]
-        lines.append(f'拍摄时间：原始日期 {original}，仅创建时间 {creation}，未知 {len(dates)-original-creation}；待补读 {pending}')
-        lines.append('完整元数据引擎：'+('ExifTool 已启用' if shutil.which('exiftool') else 'ExifTool 未安装（使用兼容读取）'))
         subscribers=self.store.db.execute('SELECT count(*) FROM subscribers WHERE enabled=1').fetchone()[0]
         notices=dict(self.store.db.execute('SELECT state,count(*) FROM notice_queue GROUP BY state'))
         lines.append(f"更新通知：订阅 {subscribers} 人，待发送 {notices.get('queued',0)}，已发送 {notices.get('sent',0)}，"
@@ -150,7 +143,8 @@ class Operations:
         return f'已排队续传：{job_id}；已保存文件会跳过。'
 
     def schedule_retry(self, job_id, error):
-        if (self.transfer_mode != 'download_upload' or type(error).__name__ not in TRANSIENT
+        if (self.transfer_mode != 'download_upload'
+                or (type(error).__name__ not in TRANSIENT and rate_wait(error,0) is None)
                 or self.store.unknown_local_send(job_id)):
             return
         return self.schedule_attempt(job_id)

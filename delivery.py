@@ -16,11 +16,8 @@ class DeliveryPaused(Exception):
 
 def display_order(items):
     """Stable display-only partition; source metadata and existing plans stay intact."""
-    from capture_time import epoch
     def key(item):
-        rank=0 if item['kind']=='document' else (2 if item['kind']=='video' else 1)
-        date=epoch(item)
-        return rank,date is None,-date if date is not None else 0
+        return 0 if item['kind']=='document' else (2 if item['kind']=='video' else 1)
     return sorted(items,key=key)
 
 
@@ -100,8 +97,7 @@ class WholeDelivery:
             await bot.send_message(uid,'已有文件夹正在发送，请等待完成后再打开另一个。',
                                    reply_markup=self.delivery_keys(dict(busy)))
             return
-        fields=('job','source_chat','source_message','file_id','kind','caption','source_kind','file_size','source_name',
-                'captured_at','capture_time_source','capture_timezone_assumed')
+        fields=('job','source_chat','source_message','file_id','kind','caption','source_kind','file_size','source_name')
         plan=[{key:item.get(key) for key in fields} for item in display_order(self.store.files(job['id']))]
         progress=self.store.start_view(uid,job['id'])
         with self.store.db:

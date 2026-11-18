@@ -102,6 +102,12 @@ class OperationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.app.schedule_incomplete(job))
         self.assertEqual(tuple(self.app.store.db.execute('select attempts,next_at from retry_schedule').fetchone()),(4,0))
 
+    async def test_exhausted_transport_flood_recovery_gets_bounded_task_retry(self):
+        Flood=type('FloodWaitError',(Exception,),{'seconds':10})
+        self.assertEqual(self.app.schedule_retry('job',Flood()),60)
+        self.app.store.begin_local_send('job',(1,2),'unconfirmed')
+        self.assertIsNone(self.app.schedule_retry('job',Flood()))
+
     async def test_short_delivery_refuses_unsafe_replays(self):
         self.app.store.update('job','needs_review',3)
         for extra in ({'expected':None},{'expected':0},{'dedup_audit':True},
