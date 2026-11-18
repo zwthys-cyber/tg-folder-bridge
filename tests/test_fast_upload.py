@@ -157,7 +157,33 @@ class Upload(unittest.IsolatedAsyncioTestCase):
             values = [call.args[0] for call in progress.call_args_list]
             self.assertEqual(values, sorted(values))
 
-    async def test_no_local_retry_on_429_or_flood_wait(self):
+    async def test_short_flood_wait_keeps_same_upload_and_confirmed_parts(self):
+        from telethon.errors import FloodWaitError
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'large.bin'
+            data = bytes(range(256)) * 45000
+            path.write_bytes(data)
+            parts, ids = {}, set()
+            failed = False
+
+            async def send(request):
+                nonlocal failed
+                ids.add(request.file_id)
+                if request.file_part == 4 and not failed:
+                    failed = True
+                    raise FloodWaitError(request=None, capture=1)
+                self.assertNotIn(request.file_part, parts)
+                parts[request.file_part] = request.bytes
+                return True
+
+            stats = {}
+            result = await upload_file(send, path, Mock(), workers=3, stats=stats)
+            self.assertEqual(ids, {result.id})
+            self.assertEqual(b''.join(parts[n] for n in sorted(parts)), data)
+            self.assertEqual(stats['rate_waits'], 1)
+            self.assertEqual(stats['retries'], 1)
+
+    async def test_no_local_retry_on_429_or_long_flood_wait(self):
         from telethon.errors import InvalidBufferError, FloodWaitError
         for error in (InvalidBufferError((-429).to_bytes(4, 'little', signed=True)),
                       FloodWaitError(request=None, capture=120)):

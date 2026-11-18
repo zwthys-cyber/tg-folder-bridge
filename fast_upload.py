@@ -33,19 +33,38 @@ async def upload_file(client, path, progress, workers=8, worker_limit=None, stat
     parts = (size + chunk_size - 1) // chunk_size
     file_id = secrets.randbits(63)
     completed = 0
+    cooldown_until = 0.0
     pending = set()
     acknowledged = set()
     identity = (path.stat().st_size, path.stat().st_mtime_ns)
 
     async def send(part, data):
-        nonlocal completed
+        nonlocal completed, cooldown_until
         began = time.monotonic()
-        try:
-            result = await asyncio.wait_for(
-                (transport.send if transport else client)(functions.upload.SaveBigFilePartRequest(
-                    file_id=file_id, file_part=part, file_total_parts=parts, bytes=data)), 65)
-        except asyncio.TimeoutError:
-            raise UploadTimeoutError('Upload part deadline exceeded') from None
+        request = functions.upload.SaveBigFilePartRequest(
+            file_id=file_id, file_part=part, file_total_parts=parts, bytes=data)
+        for attempt in range(4):
+            while (delay := cooldown_until - time.monotonic()) > 0:
+                await asyncio.sleep(delay)
+            try:
+                result = await asyncio.wait_for((transport.send if transport else client)(request), 65)
+                break
+            except asyncio.TimeoutError:
+                raise UploadTimeoutError('Upload part deadline exceeded') from None
+            except Exception as error:
+                wait = rate_wait(error, attempt)
+                # A transport-level 429 may have already closed the sender.
+                # Only short RPC waits are retried in place with the same file ID.
+                if (attempt == 3 or wait is None or wait > 60
+                        or type(error).__name__ not in {'FloodWaitError', 'FloodPremiumWaitError'}):
+                    raise
+                now = time.monotonic()
+                until = max(cooldown_until, now + wait)
+                stats['cooldown_seconds'] = stats.get('cooldown_seconds', 0.0) + max(
+                    0.0, until - max(cooldown_until, now))
+                cooldown_until = until
+                stats['rate_waits'] = stats.get('rate_waits', 0) + 1
+                stats['retries'] += 1
         if not result:
             raise RuntimeError('Telegram did not accept an upload part')
         stats['parts'] += 1
