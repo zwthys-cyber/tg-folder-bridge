@@ -42,8 +42,8 @@ class WideDownloadUnsupported(RuntimeError):
 class RequestPacer:
     """Space request starts after a rate limit, independently of in-flight size."""
 
-    def __init__(self):
-        self.interval = 0.0
+    def __init__(self, interval=0.0):
+        self.interval = interval
         self.next_request = 0.0
         self.resume_at = 0.0
         self.cooldown_seconds = 0.0
@@ -73,6 +73,27 @@ class RequestPacer:
         self.interval = max(0.06, self.interval - 0.015) if self.interval else 0.0
 
 
+class DownloadPacingHistory:
+    """Reuse successful pacing briefly for consecutive files on the same route."""
+
+    def __init__(self):
+        self.profiles = {}
+
+    def get(self, route, now):
+        profile = self.profiles.get(route)
+        if profile is None:
+            return None
+        saved_at, interval, workers = profile
+        if now - saved_at >= 120:
+            self.profiles.pop(route, None)
+            return None
+        return interval, workers
+
+    def remember(self, route, now, interval, workers):
+        if interval > 0:
+            self.profiles[route] = (now, interval, workers)
+
+
 async def wide_parts(client, document, offset, stride, count, chunk):
     location = types.InputDocumentFileLocation(document.id, document.access_hash,
                                                document.file_reference, '')
@@ -96,7 +117,7 @@ async def wide_parts(client, document, offset, stride, count, chunk):
 
 
 async def download_file(client, message, stream, progress=None, workers=8, stats=None,
-                        worker_limit=None, *, wide=True):
+                        worker_limit=None, *, wide=True, pacing_history=None):
     if not 1 <= workers <= 32:
         raise ValueError('DOWNLOAD_WORKERS must be between 1 and 32')
     stats = stats if stats is not None else {}
@@ -131,14 +152,18 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
     pool = min(32 if worker_limit else workers, (size+chunk-1)//chunk)
     stride = pool * chunk
     configured_limit = worker_limit or (lambda: workers)
-    temporary_limit = pool
+    route = (home_dc, document.dc_id) if wide else None
+    now = time.monotonic()
+    learned = pacing_history.get(route, now) if wide and pacing_history is not None else None
+    interval, temporary_limit = learned if learned is not None else (0.0, pool)
     limiter = LiveLimiter(lambda: min(configured_limit(), temporary_limit), pool)
     completed = 0
-    pacer = RequestPacer()
-    next_increase = 0.0
+    pacer = RequestPacer(interval)
+    next_increase = now + 8 if learned is not None else 0.0
     clean_parts = 0
     stats.update(mode='parallel', workers=limiter.limit(), parts=0, wait_seconds=0.0,
-                 rate_waits=0, cooldown_seconds=0.0, pace_ms=0)
+                 rate_waits=0, cooldown_seconds=0.0, pace_ms=round(interval*1000),
+                 pacing_reused=learned is not None)
     transport = 'mtproto_1m' if wide else 'sdk_ranges'
     meter = TransferMeter(stats, size, transport=transport)
 
@@ -239,6 +264,8 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
         if completed != size:
             raise DownloadCoverageError('Download coverage does not match file size')
         stream.flush()
+        if wide and pacing_history is not None:
+            pacing_history.remember(route, time.monotonic(), pacer.interval, limiter.limit())
     except BaseException as exc:
         for task in tasks:
             task.cancel()

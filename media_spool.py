@@ -6,7 +6,7 @@ import shutil
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
-from fast_download import download_file
+from fast_download import DownloadPacingHistory, download_file
 
 
 class InsufficientDiskError(RuntimeError):
@@ -50,6 +50,7 @@ class MediaSpool:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.max_bytes = max_bytes
         self.reserve_bytes = reserve_bytes
+        self.download_pacing = DownloadPacingHistory()
         self.lock = (self.root / '.lock').open('a')
         try:
             fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -89,7 +90,8 @@ class MediaSpool:
             raw = path.open('wb', buffering=0)
             with LimitedWriter(raw, self.root, self.max_bytes, self.reserve_bytes) as stream:
                 await download_file(client, message, stream, progress=progress, workers=workers,
-                                    stats=stats, worker_limit=worker_limit)
+                                    stats=stats, worker_limit=worker_limit,
+                                    pacing_history=self.download_pacing)
             actual = path.stat().st_size
             if actual == 0 or (size is not None and size > 0 and actual != size):
                 raise IncompleteMediaError('Downloaded media size does not match')

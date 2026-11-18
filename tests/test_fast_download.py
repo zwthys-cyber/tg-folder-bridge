@@ -6,10 +6,18 @@ from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, Mock
 from telethon import TelegramClient, types
 from telethon.sessions import MemorySession
-from fast_download import DownloadCoverageError, RequestPacer, download_file, wide_parts
+from fast_download import (DownloadCoverageError, DownloadPacingHistory, RequestPacer,
+                           download_file, wide_parts)
 
 
 class Pacing(unittest.TestCase):
+    def test_remembered_pacing_is_specific_to_route_and_expires(self):
+        history = DownloadPacingHistory()
+        history.remember((5, 2), 10, 0.1, 3)
+        self.assertEqual(history.get((5, 2), 129), (0.1, 3))
+        self.assertIsNone(history.get((5, 4), 129))
+        self.assertIsNone(history.get((5, 2), 130))
+
     def test_late_errors_extend_cooldown_without_multiplying_pacing_backoff(self):
         pacer = RequestPacer()
         self.assertTrue(pacer.limited(10, 9, 2, pace=True))
