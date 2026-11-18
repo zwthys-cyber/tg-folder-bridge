@@ -9,6 +9,63 @@ from fast_upload import upload_file
 
 
 class Upload(unittest.IsolatedAsyncioTestCase):
+    async def test_route_trial_compares_real_parts_and_keeps_the_faster_route(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'large.bin'
+            data = bytes(range(256)) * 45000
+            path.write_bytes(data)
+            parts = {}
+
+            def accept(request, route):
+                self.assertNotIn(request.file_part, parts)
+                parts[request.file_part] = (request.file_id, request.bytes, route)
+                return True
+
+            async def control(request):
+                await asyncio.sleep(0.012)
+                return accept(request, 'control')
+
+            async def dedicated(request):
+                return accept(request, 'dedicated')
+
+            transport = NS(count=2, prepare=AsyncMock(), close=AsyncMock(), send=dedicated)
+            stats = {}
+            with patch('fast_upload.ROUTE_MIN_BYTES', 0), patch('fast_upload.ROUTE_SAMPLE_PARTS', 4):
+                result = await upload_file(control, path, Mock(), workers=4, stats=stats,
+                                           transport=transport, route_probe=True)
+            self.assertEqual({part[0] for part in parts.values()}, {result.id})
+            self.assertEqual(b''.join(parts[n][1] for n in range(result.parts)), data)
+            self.assertEqual([parts[n][2] for n in range(4)], ['control'] * 4)
+            self.assertTrue(all(parts[n][2] == 'dedicated' for n in range(4, result.parts)))
+            self.assertEqual(stats['route_choice'], 'dedicated')
+
+    async def test_failed_route_trial_preserves_confirmed_parts_on_control(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'large.bin'
+            data = b'abcd' * 3 * 1024**2
+            path.write_bytes(data)
+            parts = {}
+
+            async def control(request):
+                self.assertNotIn(request.file_part, parts)
+                parts[request.file_part] = (request.file_id, request.bytes)
+                return True
+
+            async def dedicated(request):
+                if request.file_part == 5:
+                    raise ConnectionError('dedicated uplink unavailable')
+                return await control(request)
+
+            transport = NS(count=2, prepare=AsyncMock(), close=AsyncMock(), send=dedicated)
+            stats = {}
+            with patch('fast_upload.ROUTE_MIN_BYTES', 0), patch('fast_upload.ROUTE_SAMPLE_PARTS', 4):
+                result = await upload_file(control, path, Mock(), workers=4, stats=stats,
+                                           transport=transport, route_probe=True)
+            self.assertEqual({part[0] for part in parts.values()}, {result.id})
+            self.assertEqual(b''.join(parts[n][1] for n in range(result.parts)), data)
+            self.assertEqual(stats['route_choice'], 'control_connection_fallback')
+            transport.close.assert_awaited_once()
+
     async def test_small_files_use_larger_telethon_chunks(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'small.jpg'

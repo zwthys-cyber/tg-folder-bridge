@@ -37,7 +37,7 @@ def connections(path):
 def scheduler(path):
     path = Path(path)
     value = json.loads(path.read_text()).get('upload_scheduler', 'round_robin') if path.exists() else 'round_robin'
-    if value not in {'round_robin', 'balanced'}:
+    if value not in {'round_robin', 'balanced', 'auto'}:
         raise ValueError('Unknown upload scheduler')
     return value
 
@@ -51,7 +51,7 @@ def save(path, download, upload, automatic=False, upload_connections=None, uploa
         raise ValueError('Upload connections must be 1–4')
     if upload_scheduler is None:
         upload_scheduler = scheduler(path)
-    if upload_scheduler not in {'round_robin', 'balanced'}:
+    if upload_scheduler not in {'round_robin', 'balanced', 'auto'}:
         raise ValueError('Unknown upload scheduler')
     temporary = None
     try:

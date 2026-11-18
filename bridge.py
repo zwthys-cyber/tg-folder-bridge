@@ -569,8 +569,13 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
             try:
                 if not 1 <= len(context.args) <= 2:
                     raise ValueError
-                count = int(context.args[0])
-                scheduler = context.args[1] if len(context.args) == 2 else self.upload_scheduler
+                if context.args == ['auto']:
+                    count, scheduler = 2, 'auto'
+                else:
+                    count = int(context.args[0])
+                    scheduler = context.args[1] if len(context.args) == 2 else self.upload_scheduler
+                    if scheduler == 'auto':
+                        scheduler = 'balanced'
                 if not 1 <= count <= 4:
                     raise ValueError
                 transfer_settings.save(self.settings_file, self.download_workers,
@@ -578,11 +583,12 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 self.upload_connections = count
                 self.upload_scheduler = scheduler
             except ValueError:
-                await update.message.reply_text('用法：/transport 2 [balanced 或 round_robin]；支持 1–4，1 为原上传通道。')
+                await update.message.reply_text('用法：/transport auto 或 /transport 2 [balanced 或 round_robin]。支持 1–4。')
                 raise ApplicationHandlerStop
         await update.message.reply_text(
             f'大文件上传连接：{self.upload_connections}；调度：{self.upload_scheduler}。\n'
-            '1 为原通道；2–4 为独立媒体连接，设置从下一个文件生效。\n'
+            'auto 通过同一文件比较原通道和两条媒体连接，设置从下一个文件生效。\n'
+            '1 为原通道，2–4 为独立媒体连接。\n'
             '分块总并发仍由 /speed 控制；/diagnostics 查看实测记录。')
         raise ApplicationHandlerStop
 
@@ -596,11 +602,14 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
             m = row['payload']
             cooldown = (f"\n限流响应 {m['rate_waits']} 次，合计等待 {m.get('cooldown_seconds', 0):.1f} 秒"
                         if m.get('rate_waits') else '')
+            routes = (f"\n原通道 {m.get('control_mib', 0):.2f} MiB/s，媒体连接 "
+                      f"{m.get('dedicated_mib', 0):.2f} MiB/s，选择 {m['route_choice']}"
+                      if m.get('route_choice') else '')
             lines.append(f"{row['at']} UTC · {row['phase']} · {row['job']}\n"
                 f"{m.get('bytes', 0)/1024**2:.1f} MiB / {m.get('seconds', 0):.1f} 秒 · "
                 f"{m.get('average_mib', 0):.2f} MiB/s\n"
                 f"{m.get('transport', '?')} · {m.get('connections', 1)} 连接 · "
-                f"p95 {m.get('p95_ms', 0):.0f} ms · 分块续传 {m.get('retries', 0)} 次 · {m.get('error') or '阶段完成'}{cooldown}")
+                f"p95 {m.get('p95_ms', 0):.0f} ms · 分块续传 {m.get('retries', 0)} 次 · {m.get('error') or '阶段完成'}{cooldown}{routes}")
         if len(lines) == 1:
             lines.append('还没有新版本的传输记录，当前文件完成后可查看。')
         await update.message.reply_text('\n\n'.join(lines))
@@ -612,13 +621,14 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
             self.upload_transport = None
 
     async def get_upload_transport(self):
+        scheduler = 'balanced' if self.upload_scheduler == 'auto' else self.upload_scheduler
         if self.upload_transport and (self.upload_transport.count != self.upload_connections
-                or self.upload_transport.scheduler != self.upload_scheduler):
+                or self.upload_transport.scheduler != scheduler):
             await self.close_upload_transport()
         if self.upload_connections == 1:
             return None
         if self.upload_transport is None:
-            self.upload_transport = UploadTransport(self.client, self.upload_connections, self.upload_scheduler)
+            self.upload_transport = UploadTransport(self.client, self.upload_connections, scheduler)
         return self.upload_transport
 
     async def resume(self, update, context):
@@ -947,7 +957,8 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
             nonlocal last_update
             direction = '下载' if label == '下载' else '上传'
             metrics = job.get('download_stats' if direction == '下载' else 'upload_stats', {})
-            if self.automatic_speed and metrics.get('parts') and not metrics.get('pipeline'):
+            if (self.automatic_speed and metrics.get('parts') and not metrics.get('pipeline')
+                    and not metrics.get('route_probing')):
                 self.tuners[direction].observe(current, total, metrics['parts'])
             now = time.monotonic()
             if now - last_update < 3 and (not total or current < total):
@@ -975,7 +986,9 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 detail += f"\n上传并发 {metrics.get('workers', 1)} 路"
                 if metrics.get('parts'):
                     detail += f"；分块平均等待 {1000 * metrics['wait_seconds'] / metrics['parts']:.0f} ms"
-            if self.automatic_speed and metrics.get('parts') and not metrics.get('pipeline'):
+            if metrics.get('route_probing'):
+                detail += '\n正在以相同并发比较两种上传通道。'
+            elif self.automatic_speed and metrics.get('parts') and not metrics.get('pipeline'):
                 detail += f'\n自动调速：{self.tuners[direction].note}；下一批并发 {self.worker_limit(direction)} 路'
             if metrics.get('recent_seconds', 0) > 0:
                 detail += (f"\n近期 {metrics['recent_seconds']:.1f} 秒：{metrics.get('recent_mib', 0):.2f} MiB/s"
@@ -1097,7 +1110,8 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                         self.client, upload_path,
                         progress=self.progress(self.active, '上传预览' if preview else '上传'),
                         workers=self.upload_workers, worker_limit=lambda: self.worker_limit('上传'),
-                        stats=self.active['upload_stats'], transport=await self.get_upload_transport())
+                        stats=self.active['upload_stats'], transport=await self.get_upload_transport(),
+                        route_probe=self.upload_scheduler == 'auto')
                 except BaseException as exc:
                     failure = error_detail(exc, '上传')
                     await self.close_upload_transport()

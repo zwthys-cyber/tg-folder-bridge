@@ -260,7 +260,7 @@ class Store:
         keys = ('bytes', 'total', 'seconds', 'average_mib', 'recent_mib',
                 'recent_seconds', 'connections', 'transport', 'workers', 'p50_ms', 'p95_ms',
                 'retries', 'scheduler', 'rate_waits', 'cooldown_seconds', 'pace_ms', 'pacing_reused',
-                'resumed_bytes')
+                'resumed_bytes', 'control_mib', 'dedicated_mib', 'route_choice')
         payload = {key: stats[key] for key in keys if key in stats}
         payload['error'] = error
         self.db.execute('INSERT INTO transfer_metrics(job,phase,payload) VALUES(?,?,?)',
