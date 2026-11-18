@@ -1,0 +1,40 @@
+name: Native transfer probe
+on:
+  push:
+    paths: ['native/**', '.github/workflows/native.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CGO_ENABLED: '0'
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 4GiB
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: native/go.sum
+      - name: Resolve pinned module graph
+        working-directory: native
+        run: go mod tidy
+      - name: Test worker guards
+        working-directory: native
+        run: go test -p 1 ./...
+      - name: Build Linux worker
+        working-directory: native
+        run: |
+          mkdir -p ../native-dist
+          go build -p 1 -trimpath -ldflags='-s -w' -o ../native-dist/tg-transfer-helper .
+          cp go.mod go.sum ../native-dist/
+          cd ../native-dist
+          sha256sum tg-transfer-helper > SHA256SUMS
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: native-transfer-probe
+          path: native-dist/
+          retention-days: 7
