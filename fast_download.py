@@ -122,7 +122,6 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
         raise ValueError('DOWNLOAD_WORKERS must be between 1 and 32')
     stats = stats if stats is not None else {}
     size = getattr(getattr(message, 'file', None), 'size', None)
-    parallel = workers > 1 and bool(getattr(message, 'document', None)) and size and size > 10 * 1024**2
 
     async def standard(mode='sdk'):
         if checkpoint is not None:
@@ -144,25 +143,27 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
         finally:
             meter.finish()
 
-    if not parallel:
-        await standard()
-        return
     document = getattr(message, 'document', None)
     home_dc = getattr(getattr(client, 'session', None), 'dc_id', None)
     wide = bool(wide and home_dc and isinstance(document, types.Document)
                 and document.file_reference and document.dc_id
                 and (home_dc == document.dc_id or all(callable(getattr(client, name, None))
                      for name in ('_borrow_exported_sender', '_return_exported_sender', '_call'))))
+    short = bool(size and size <= 10 * 1024**2)
+    if (workers == 1 or not document or not size
+            or (short and (not wide or size < 2 * 1024**2))):
+        await standard()
+        return
     chunk = (1024 if wide else 512) * 1024
     if checkpoint is not None:
         checkpoint.begin(chunk)
     saved = frozenset(checkpoint.parts) if checkpoint is not None else frozenset()
     resumed = sum(min(chunk, size-offset) for offset in saved)
     stats['resumed_bytes'] = resumed
-    pool = min(32 if worker_limit else workers, (size+chunk-1)//chunk)
+    pool = min(4 if short else 32, 32 if worker_limit else workers, (size+chunk-1)//chunk)
     stride = pool * chunk
     configured_limit = worker_limit or (lambda: workers)
-    route = (home_dc, document.dc_id) if wide else None
+    route = (home_dc, document.dc_id, short) if wide else None
     now = time.monotonic()
     learned = pacing_history.get(route, now) if wide and pacing_history is not None else None
     interval, temporary_limit = learned if learned is not None else (0.0, pool)
@@ -174,7 +175,7 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
     stats.update(mode='parallel', workers=limiter.limit(), parts=0, wait_seconds=0.0,
                  rate_waits=0, cooldown_seconds=0.0, pace_ms=round(interval*1000),
                  pacing_reused=learned is not None)
-    transport = 'mtproto_1m' if wide else 'sdk_ranges'
+    transport = ('mtproto_1m_short' if short else 'mtproto_1m') if wide else 'sdk_ranges'
     meter = TransferMeter(stats, size, transport=transport)
     if resumed and progress is not None:
         progress(resumed, size)

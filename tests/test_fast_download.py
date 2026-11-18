@@ -146,6 +146,35 @@ class Downloads(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sorted(offsets), list(range(0, len(data), chunk)))
         self.assertEqual(stats['transport'], 'mtproto_1m')
 
+    async def test_short_document_uses_aligned_ranges_with_four_request_ceiling(self):
+        chunk = 1024**2
+        data = bytes(range(256)) * 23000 + b'tail'
+        document = types.Document(id=123, access_hash=456, file_reference=b'ref',
+            date=datetime.now(timezone.utc), mime_type='application/octet-stream',
+            size=len(data), dc_id=2, attributes=[])
+        active = peak = 0
+
+        class Client:
+            session = NS(dc_id=2)
+
+            async def __call__(self, request):
+                nonlocal active, peak
+                active += 1
+                peak = max(peak, active)
+                try:
+                    await asyncio.sleep(0)
+                    return types.upload.File(types.storage.FileUnknown(), 0,
+                        data[request.offset:request.offset+request.limit])
+                finally:
+                    active -= 1
+
+        output, stats = io.BytesIO(), {}
+        await download_file(Client(), NS(document=document, file=NS(size=len(data))),
+                            output, workers=32, stats=stats)
+        self.assertEqual(output.getvalue(), data)
+        self.assertEqual(peak, 4)
+        self.assertEqual(stats['transport'], 'mtproto_1m_short')
+
     async def test_cross_dc_sender_is_returned_when_range_closes_early(self):
         sender = object()
         client = NS(session=NS(dc_id=5), _borrow_exported_sender=AsyncMock(return_value=sender),
