@@ -3,6 +3,7 @@ import asyncio
 import time
 import contextlib
 from contextlib import asynccontextmanager
+from telethon import functions, types
 from transfer_metrics import TransferMeter
 from transport_recovery import rate_wait
 
@@ -33,7 +34,23 @@ class DownloadCoverageError(RuntimeError):
     pass
 
 
-async def download_file(client, message, stream, progress=None, workers=8, stats=None, worker_limit=None):
+class WideDownloadUnsupported(RuntimeError):
+    pass
+
+
+async def wide_parts(client, document, offset, stride, count, chunk):
+    location = types.InputDocumentFileLocation(document.id, document.access_hash,
+                                               document.file_reference, '')
+    for index in range(count):
+        result = await client(functions.upload.GetFileRequest(
+            location, offset + index*stride, chunk, cdn_supported=False))
+        if not isinstance(result, types.upload.File):
+            raise WideDownloadUnsupported('The response requires the SDK download path')
+        yield result.bytes
+
+
+async def download_file(client, message, stream, progress=None, workers=8, stats=None,
+                        worker_limit=None, *, wide=True):
     if not 1 <= workers <= 32:
         raise ValueError('DOWNLOAD_WORKERS must be between 1 and 32')
     stats = stats if stats is not None else {}
@@ -58,7 +75,11 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
     if not parallel:
         await standard()
         return
-    chunk = 512 * 1024
+    document = getattr(message, 'document', None)
+    wide = bool(wide and isinstance(document, types.Document)
+                and getattr(getattr(client, 'session', None), 'dc_id', None) == document.dc_id
+                and document.file_reference)
+    chunk = (1024 if wide else 512) * 1024
     pool = min(32 if worker_limit else workers, (size+chunk-1)//chunk)
     stride = pool * chunk
     configured_limit = worker_limit or (lambda: workers)
@@ -69,15 +90,21 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
     next_increase = 0.0
     clean_parts = 0
     stats.update(mode='parallel', workers=limiter.limit(), parts=0, wait_seconds=0.0)
-    meter = TransferMeter(stats, size, transport='sdk_ranges')
+    transport = 'mtproto_1m' if wide else 'sdk_ranges'
+    meter = TransferMeter(stats, size, transport=transport)
 
     async def download_range(index):
         nonlocal completed, pause_until, temporary_limit, next_increase, clean_parts
         offset = index * chunk
         count = (size - offset + stride - 1) // stride
         def iterator_at(position, remaining):
+            if wide:
+                return wide_parts(client, document, position, stride, remaining, chunk)
             return client.iter_download(message, offset=position, stride=stride,
                 limit=remaining, chunk_size=chunk, request_size=chunk, file_size=size)
+
+        async def close_iterator(iterator):
+            await (iterator.aclose() if wide else iterator.close())
         iterator = iterator_at(offset, count)
         started = False
         try:
@@ -121,14 +148,14 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
                         # ranges stay intact; retry exactly the failed offset.
                         pause_until = max(pause_until, time.monotonic()+wait)
                         with contextlib.suppress(Exception):
-                            await iterator.close()
+                            await close_iterator(iterator)
                         iterator = iterator_at(offset, count-part)
                         started = False
                 stats['workers'] = limiter.limit()
                 stats['parts'] += 1
                 if began >= pause_until and temporary_limit < pool:
                     clean_parts += 1
-                    if clean_parts >= 32 and time.monotonic() >= next_increase:
+                    if clean_parts * chunk >= 16*1024**2 and time.monotonic() >= next_increase:
                         temporary_limit += 1
                         clean_parts = 0
                         next_increase = time.monotonic()+8
@@ -147,7 +174,7 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
                 offset += stride
         finally:
             if started:
-                await iterator.close()
+                await close_iterator(iterator)
 
     tasks = [asyncio.create_task(download_range(index)) for index in range(pool)]
     try:
@@ -159,6 +186,13 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if wide and type(exc).__name__ in {'WideDownloadUnsupported', 'FileMigrateError',
+                'LimitInvalidError', 'OffsetInvalidError', 'FileReferenceExpiredError',
+                'FileReferenceInvalidError', 'FilerefUpgradeNeededError'}:
+            stream.seek(0)
+            stream.truncate(0)
+            return await download_file(client, message, stream, progress, workers,
+                                       stats, worker_limit, wide=False)
         if type(exc).__name__ not in {'_CdnRedirect', 'FileReferenceExpiredError', 'FilerefUpgradeNeededError'}:
             raise
         # Public iter_download lacks download_media's CDN/ref-refresh wrapper.
@@ -168,5 +202,5 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
         stream.truncate(0)
         await standard(mode='sdk_fallback')
     finally:
-        if stats.get('mode') == 'parallel':
+        if stats.get('transport') == transport:
             meter.finish()

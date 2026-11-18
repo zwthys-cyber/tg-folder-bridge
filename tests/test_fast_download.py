@@ -88,7 +88,7 @@ class Downloads(unittest.IsolatedAsyncioTestCase):
         client._call = AsyncMock(side_effect=call)
         output, stats, progress = io.BytesIO(), {}, Mock()
         try:
-            await download_file(client, message, output, progress, workers=4, stats=stats)
+            await download_file(client, message, output, progress, workers=4, stats=stats, wide=False)
             self.assertEqual(output.getvalue(), data)
             self.assertGreater(peak, 1)
             self.assertLessEqual(peak, 4)
@@ -97,6 +97,32 @@ class Downloads(unittest.IsolatedAsyncioTestCase):
             progress.assert_called_with(len(data), len(data))
         finally:
             await client.disconnect()
+
+    async def test_home_dc_one_mib_requests_preserve_offsets_and_short_tail(self):
+        chunk = 1024**2
+        data = bytes(range(256)) * 42000 + b'tail'
+        document = types.Document(id=123, access_hash=456, file_reference=b'ref',
+            date=datetime.now(timezone.utc), mime_type='application/octet-stream',
+            size=len(data), dc_id=2, attributes=[])
+        offsets = []
+
+        class Client:
+            session = NS(dc_id=2)
+
+            async def __call__(self, request):
+                self_offset = request.offset
+                offsets.append(self_offset)
+                if request.limit != chunk or self_offset % chunk:
+                    raise AssertionError('expected a single aligned 1 MiB part')
+                return types.upload.File(types.storage.FileUnknown(), 0,
+                                         data[self_offset:self_offset+chunk])
+
+        output, stats = io.BytesIO(), {}
+        await download_file(Client(), NS(document=document, file=NS(size=len(data))),
+                            output, workers=4, stats=stats)
+        self.assertEqual(output.getvalue(), data)
+        self.assertEqual(sorted(offsets), list(range(0, len(data), chunk)))
+        self.assertEqual(stats['transport'], 'mtproto_1m')
 
     async def test_sparse_file_size_cannot_hide_a_missing_range(self):
         data = b'x' * (11 * 1024**2 + 123)
