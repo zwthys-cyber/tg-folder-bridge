@@ -954,13 +954,16 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 return
             last_update = now
             elapsed = max(now - started, metrics.get('seconds', 0), 0.01)
-            rate = current / elapsed
+            resumed = metrics.get('resumed_bytes', 0)
+            rate = max(0, current - resumed) / elapsed
             total_text = f'{total / 1024**2:.1f} MiB' if total else '未知'
             percent = f'{current / total:.1%}' if total else ''
             eta = f'{max(0, total-current) / rate / 60:.1f} 分钟' if total and rate > 0 else '估算中'
             detail = (f'{label}：{current / 1024**2:.1f} / {total_text} {percent}\n'
                       f'平均速度 {rate / 1024**2:.2f} MiB/s；此阶段剩余约 {eta}')
             if label == '下载':
+                if resumed:
+                    detail += f'\n已复用本地分块 {resumed / 1024**2:.1f} MiB'
                 metrics = job.get('download_stats', {})
                 detail += f"\n下载并发 {metrics.get('workers', 1)} 路"
                 if metrics.get('parts'):

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -66,6 +67,66 @@ class Spool(unittest.IsolatedAsyncioTestCase):
                     self.fail('partial file must not be yielded')
         self.assertEqual(list(self.root.glob('ready-*')), [])
         self.assert_empty()
+
+    async def test_parallel_resume_verifies_each_chunk_and_only_requests_missing_offsets(self):
+        chunk = 512 * 1024
+        data = bytes(range(256)) * 45000 + b'tail'
+        self.message = NS(chat_id=1, id=2, document=NS(id=3), photo=None,
+                          file=NS(size=len(data), ext='.mp4'))
+        self.spool.close()
+        self.spool = MediaSpool(self.root, max_bytes=len(data), reserve_bytes=1)
+        waiting = asyncio.Event()
+        attempts = []
+        blocked = True
+
+        class Parts:
+            def __init__(self, offset, stride, **unused):
+                self.offset, self.stride = offset, stride
+
+            async def __anext__(self):
+                offset = self.offset
+                if blocked and offset >= 4 * chunk:
+                    waiting.set()
+                    await asyncio.Future()
+                attempts.append(offset)
+                self.offset += self.stride
+                return data[offset:offset+chunk]
+
+            async def close(self):
+                pass
+
+        client = NS(iter_download=lambda message, **kwargs: Parts(**kwargs))
+
+        async def stage():
+            async with self.spool.stage(client, self.message, workers=2, checkpoint_scope='job'):
+                self.fail('interrupted download reached delivery')
+
+        with patch.object(MediaSpool, 'checkpoint_minimum', 1):
+            task = asyncio.create_task(stage())
+            await waiting.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+            [partial] = self.root.glob('partial-*')
+            saved = {int(offset) for offset in json.loads((partial/'parts.json').read_text())['parts']}
+            self.assertGreaterEqual(len(saved), 2)
+            corrupted = min(saved)
+            with (partial/'media.mp4').open('r+b') as file:
+                file.seek(corrupted)
+                file.write(b'bad')
+            saved.remove(corrupted)
+            self.spool.close()
+            self.spool = MediaSpool(self.root, max_bytes=len(data), reserve_bytes=1)
+            blocked = False
+            attempts.clear()
+            stats = {}
+            async with self.spool.stage(client, self.message, workers=4, stats=stats,
+                                        checkpoint_scope='job') as path:
+                self.assertEqual(path.read_bytes(), data)
+                self.assertEqual(stats['resumed_bytes'], len(saved) * chunk)
+            self.assertEqual(set(attempts), set(range(0, len(data), chunk)) - saved)
+            self.assertEqual(list(self.root.glob('partial-*')), [])
 
     async def test_file_survives_until_upload_confirmed_then_is_deleted(self):
         async def download(message, file):

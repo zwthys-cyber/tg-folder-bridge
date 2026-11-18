@@ -117,7 +117,7 @@ async def wide_parts(client, document, offset, stride, count, chunk):
 
 
 async def download_file(client, message, stream, progress=None, workers=8, stats=None,
-                        worker_limit=None, *, wide=True, pacing_history=None):
+                        worker_limit=None, *, wide=True, pacing_history=None, checkpoint=None):
     if not 1 <= workers <= 32:
         raise ValueError('DOWNLOAD_WORKERS must be between 1 and 32')
     stats = stats if stats is not None else {}
@@ -125,6 +125,11 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
     parallel = workers > 1 and bool(getattr(message, 'document', None)) and size and size > 10 * 1024**2
 
     async def standard(mode='sdk'):
+        if checkpoint is not None:
+            checkpoint.reset()
+            stream.seek(0)
+            stream.truncate(0)
+            stats.pop('resumed_bytes', None)
         stats.update(mode=mode, workers=1, parts=0, wait_seconds=0.0)
         meter = TransferMeter(stats, size, transport=mode)
         kwargs = dict(file=stream)
@@ -149,6 +154,11 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
                 and (home_dc == document.dc_id or all(callable(getattr(client, name, None))
                      for name in ('_borrow_exported_sender', '_return_exported_sender', '_call'))))
     chunk = (1024 if wide else 512) * 1024
+    if checkpoint is not None:
+        checkpoint.begin(chunk)
+    saved = frozenset(checkpoint.parts) if checkpoint is not None else frozenset()
+    resumed = sum(min(chunk, size-offset) for offset in saved)
+    stats['resumed_bytes'] = resumed
     pool = min(32 if worker_limit else workers, (size+chunk-1)//chunk)
     stride = pool * chunk
     configured_limit = worker_limit or (lambda: workers)
@@ -157,7 +167,7 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
     learned = pacing_history.get(route, now) if wide and pacing_history is not None else None
     interval, temporary_limit = learned if learned is not None else (0.0, pool)
     limiter = LiveLimiter(lambda: min(configured_limit(), temporary_limit), pool)
-    completed = 0
+    completed = resumed
     pacer = RequestPacer(interval)
     next_increase = now + 8 if learned is not None else 0.0
     clean_parts = 0
@@ -166,6 +176,8 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
                  pacing_reused=learned is not None)
     transport = 'mtproto_1m' if wide else 'sdk_ranges'
     meter = TransferMeter(stats, size, transport=transport)
+    if resumed and progress is not None:
+        progress(resumed, size)
 
     async def download_range(index):
         nonlocal completed, temporary_limit, next_increase, clean_parts
@@ -179,10 +191,15 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
 
         async def close_iterator(iterator):
             await (iterator.aclose() if wide else iterator.close())
-        iterator = iterator_at(offset, count)
-        started = False
+        iterator = None
         try:
             for part in range(count):
+                if offset in saved:
+                    if iterator is not None:
+                        await close_iterator(iterator)
+                        iterator = None
+                    offset += stride
+                    continue
                 retries = 0
                 while True:
                     delay = pacer.delay(time.monotonic())
@@ -196,7 +213,8 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
                             if pacer.delay(began):
                                 continue
                             pacer.started(began)
-                            started = True
+                            if iterator is None:
+                                iterator = iterator_at(offset, count-part)
                             try:
                                 data = await iterator.__anext__()
                             except Exception as error:
@@ -226,10 +244,10 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
                         # ranges stay intact; retry exactly the failed offset.
                         if rate_wait(error, retries-1) is None:
                             pacer.pause(time.monotonic(), wait)
-                        with contextlib.suppress(Exception):
-                            await close_iterator(iterator)
-                        iterator = iterator_at(offset, count-part)
-                        started = False
+                        if iterator is not None:
+                            with contextlib.suppress(Exception):
+                                await close_iterator(iterator)
+                        iterator = None
                 stats['workers'] = limiter.limit()
                 stats['parts'] += 1
                 if began >= pacer.resume_at:
@@ -249,13 +267,15 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
                 # offsets, through the same size and free-space guarded stream.
                 stream.seek(offset)
                 stream.write(data)
+                if checkpoint is not None:
+                    checkpoint.record(offset, data)
                 completed += len(data)
-                meter.update(completed, time.monotonic()-began)
+                meter.update(completed-resumed, time.monotonic()-began)
                 if progress is not None:
                     progress(completed, size)
                 offset += stride
         finally:
-            if started:
+            if iterator is not None:
                 await close_iterator(iterator)
 
     tasks = [asyncio.create_task(download_range(index)) for index in range(pool)]
@@ -275,8 +295,10 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
                 'FileReferenceInvalidError', 'FilerefUpgradeNeededError', 'DownloadCoverageError'}:
             stream.seek(0)
             stream.truncate(0)
+            if checkpoint is not None:
+                checkpoint.reset()
             return await download_file(client, message, stream, progress, workers,
-                                       stats, worker_limit, wide=False)
+                                       stats, worker_limit, wide=False, checkpoint=checkpoint)
         if type(exc).__name__ not in {'_CdnRedirect', 'FileReferenceExpiredError', 'FilerefUpgradeNeededError'}:
             raise
         # Public iter_download lacks download_media's CDN/ref-refresh wrapper.

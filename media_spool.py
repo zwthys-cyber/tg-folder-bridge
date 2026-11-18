@@ -8,9 +8,10 @@ import re
 import shutil
 import tempfile
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from fast_download import DownloadPacingHistory, download_file
+from download_checkpoint import PartialDownload
 from local_upload import DeliveryUnknownError
 from transport_recovery import rate_wait
 
@@ -88,8 +89,8 @@ class MediaSpool:
     def prune_checkpoints(self, for_new=False, evict_unused=False):
         candidates = []
         now = time.time()
-        for child in self.root.glob('ready-*'):
-            if child in self.in_use or not re.fullmatch(r'ready-[0-9a-f]{64}', child.name):
+        for child in self.root.iterdir():
+            if child in self.in_use or not re.fullmatch(r'(?:ready|partial)-[0-9a-f]{64}', child.name):
                 continue
             if child.is_symlink() or not child.is_dir():
                 child.unlink()
@@ -117,6 +118,11 @@ class MediaSpool:
         with path.open('rb') as stream:
             os.fsync(stream.fileno())
 
+    @staticmethod
+    def recoverable(error):
+        return (isinstance(error, (ConnectionError, asyncio.TimeoutError, asyncio.CancelledError))
+                or rate_wait(error, 0) is not None)
+
     @asynccontextmanager
     async def held_checkpoint(self, directory, name):
         self.in_use.add(directory)
@@ -124,9 +130,7 @@ class MediaSpool:
         try:
             yield directory / name
         except BaseException as error:
-            preserve = (isinstance(error, (ConnectionError, asyncio.TimeoutError, asyncio.CancelledError,
-                                           DeliveryUnknownError))
-                        or rate_wait(error, 0) is not None)
+            preserve = self.recoverable(error) or isinstance(error, DeliveryUnknownError)
             raise
         finally:
             self.in_use.remove(directory)
@@ -158,23 +162,56 @@ class MediaSpool:
                     yield path
                 return
             shutil.rmtree(checkpoint)
+        partial = checkpoint.with_name(checkpoint.name.replace('ready-', 'partial-', 1)) if checkpoint else None
+        state = PartialDownload() if partial and workers > 1 else None
+        if state and partial.is_dir():
+            self.in_use.add(partial)
+            try:
+                await asyncio.to_thread(state.load, partial, name, size)
+            finally:
+                self.in_use.remove(partial)
+            if not state.parts:
+                shutil.rmtree(partial)
         required = size if size is not None else self.max_bytes
+        if state and state.parts:
+            required -= sum(min(state.chunk, size-offset) for offset in state.parts)
         if shutil.disk_usage(self.root).free < required + self.reserve_bytes:
             if checkpoint:
-                self.prune_checkpoints(evict_unused=True)
+                self.in_use.add(partial)
+                try:
+                    self.prune_checkpoints(evict_unused=True)
+                finally:
+                    self.in_use.remove(partial)
             if not checkpoint or shutil.disk_usage(self.root).free < required + self.reserve_bytes:
                 raise InsufficientDiskError('Not enough free disk space')
         with tempfile.TemporaryDirectory(prefix='transfer-', dir=self.root) as directory:
             path = Path(directory) / name
-            path.touch(mode=0o600, exist_ok=False)
-            raw = path.open('wb', buffering=0)
-            with LimitedWriter(raw, self.root, self.max_bytes, self.reserve_bytes) as stream:
-                await download_file(client, message, stream, progress=progress, workers=workers,
-                                    stats=stats, worker_limit=worker_limit,
-                                    pacing_history=self.download_pacing)
+            if state and state.parts:
+                (partial / name).rename(path)
+                shutil.rmtree(partial)
+            else:
+                path.touch(mode=0o600, exist_ok=False)
+            raw = path.open('r+b', buffering=0)
+            try:
+                with LimitedWriter(raw, self.root, self.max_bytes, self.reserve_bytes) as stream:
+                    await download_file(client, message, stream, progress=progress, workers=workers,
+                                        stats=stats, worker_limit=worker_limit,
+                                        pacing_history=self.download_pacing, checkpoint=state)
+            except BaseException as error:
+                if state and state.parts and self.recoverable(error):
+                    with suppress(OSError):
+                        await asyncio.to_thread(self.sync_file, path)
+                        if not partial.exists() and len(self.in_use) < self.checkpoint_limit:
+                            state.save(Path(directory))
+                            self.prune_checkpoints(for_new=True)
+                            os.utime(directory, None)
+                            Path(directory).rename(partial)
+                raise
             actual = path.stat().st_size
             if actual == 0 or (size is not None and size > 0 and actual != size):
                 raise IncompleteMediaError('Downloaded media size does not match')
+            if partial and partial.is_dir() and partial not in self.in_use:
+                shutil.rmtree(partial)
             if checkpoint and len(self.in_use) < self.checkpoint_limit:
                 await asyncio.to_thread(self.sync_file, path)
             if (checkpoint and not checkpoint.exists()
