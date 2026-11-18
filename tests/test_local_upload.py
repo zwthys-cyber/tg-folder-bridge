@@ -10,7 +10,8 @@ from telegram.error import BadRequest, TimedOut, RetryAfter
 from telegram.ext import Application
 from bot_api_config import configure, endpoint, LOCAL
 from core import Store
-from local_upload import eligible, safe_filename, send_local, DeliveryUnknownError, LocalBotRateLimitError
+from local_upload import (eligible, safe_filename, send_local, DeliveryUnknownError,
+                          LocalBotRateLimitError, LocalBotUploadRejected)
 
 
 class Config(unittest.TestCase):
@@ -98,6 +99,21 @@ class Delivery(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(self.store.unknown_local_send('job'))
             if isinstance(error.exception, LocalBotRateLimitError):
                 self.assertEqual(error.exception.seconds, 17)
+
+    async def test_upload_rejection_exposes_only_the_method_and_fixed_reason(self):
+        self.bot.send_document.side_effect = BadRequest('realpath failed for /private/file.mov')
+        with self.assertRaises(LocalBotUploadRejected) as rejected:
+            await self.deliver()
+        self.assertEqual(rejected.exception.method, 'sendDocument')
+        self.assertEqual(rejected.exception.reason, 'local_file')
+        self.assertNotIn('/private', str(rejected.exception))
+        self.assertFalse(self.store.unknown_local_send('job'))
+
+    async def test_rejection_from_index_write_cannot_authorize_duplicate_upload(self):
+        with patch.object(self.store, 'add_file', side_effect=BadRequest('video_file_invalid')):
+            with self.assertRaises(DeliveryUnknownError):
+                await self.deliver()
+        self.assertTrue(self.store.unknown_local_send('job'))
 
     async def test_cancel_after_submission_blocks_duplicate_and_cleans_handoff(self):
         gate = asyncio.Event()

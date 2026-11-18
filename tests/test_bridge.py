@@ -8,9 +8,12 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, patch
 from telegram.ext import ApplicationHandlerStop
-from telegram.error import RetryAfter
+from telegram.error import BadRequest, RetryAfter, TimedOut
 from bridge import Bridge
 from core import Store, media_count, parse_link
+from telethon.tl.types import DocumentAttributeVideo
+from bot_api_config import LOCAL
+from local_upload import DeliveryUnknownError, LocalBotUploadRejected
 
 
 class Parsing(unittest.TestCase):
@@ -868,6 +871,44 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         await self.bridge.deliver(NS(), (1, 2), marker='nonce', upload_path=path)
         self.bridge.deliver_local.assert_awaited_once()
         self.assertIsNone(self.bridge.pending)
+
+    async def test_hybrid_retries_explicit_video_rejection_as_original_document(self):
+        self.bridge.active = dict(id='job', expected=1)
+        path = Path(self.tmp.name)/'original.mov'
+        path.write_bytes(b'original')
+        media = NS(file_id='document-id', file_size=8, thumbnail=None)
+        reply = NS(chat_id=7, message_id=4, document=media)
+        send_video = AsyncMock(side_effect=BadRequest('VIDEO_FILE_INVALID'))
+        send_document = AsyncMock(return_value=reply)
+        self.bridge.app = NS(bot=NS(local_mode=True, base_url=LOCAL+'/botTEST',
+                                    send_video=send_video, send_document=send_document))
+        message = NS(raw_text='', media=NS(video=True), photo=None, document=None)
+        attrs = [DocumentAttributeVideo(10, 128, 72, supports_streaming=True)]
+        await self.bridge.deliver_local(message, (1, 2), 'nonce', path, attrs, False, None, False)
+        send_video.assert_awaited_once()
+        send_document.assert_awaited_once()
+        self.assertEqual(path.read_bytes(), b'original')
+        self.assertEqual([row['kind'] for row in self.bridge.store.files('job')], ['document'])
+        states = self.bridge.store.db.execute('SELECT state FROM local_send_intents ORDER BY id')
+        self.assertEqual([row[0] for row in states], ['rejected', 'confirmed'])
+
+    async def test_hybrid_does_not_fallback_on_unknown_or_chat_rejection(self):
+        self.bridge.active = dict(id='job', expected=1)
+        path = Path(self.tmp.name)/'original.mov'
+        path.write_bytes(b'original')
+        send_video = AsyncMock(side_effect=BadRequest('chat not found'))
+        send_document = AsyncMock()
+        self.bridge.app = NS(bot=NS(local_mode=True, base_url=LOCAL+'/botTEST',
+                                    send_video=send_video, send_document=send_document))
+        message = NS(raw_text='', media=NS(video=True), photo=None)
+        attrs = [DocumentAttributeVideo(10, 128, 72)]
+        with self.assertRaises(LocalBotUploadRejected):
+            await self.bridge.deliver_local(message, (1, 2), 'nonce', path, attrs, False, None, False)
+        send_video.side_effect = TimedOut()
+        with self.assertRaises(DeliveryUnknownError):
+            await self.bridge.deliver_local(message, (1, 2), 'nonce', path, attrs, False, None, False)
+        send_document.assert_not_awaited()
+        self.assertTrue(self.bridge.store.unknown_local_send('job'))
 
     async def test_unknown_local_delivery_is_not_replayed_after_restart(self):
         self.bridge.transfer_mode = 'download_upload'

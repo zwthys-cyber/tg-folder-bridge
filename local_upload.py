@@ -23,6 +23,41 @@ class LocalBotRateLimitError(RuntimeError):
         super().__init__('Local Bot API rate limited')
 
 
+class LocalBotUploadRejected(BadRequest):
+    def __init__(self, method, reason):
+        self.method = method
+        self.reason = reason
+        self.code = 400
+        super().__init__(f'{method}: {reason}')
+
+
+def rejection_reason(error):
+    # Only persist fixed labels. Telegram descriptions can contain paths or URLs.
+    description = str(error).casefold()
+    for reason, patterns in (
+        ('thumbnail', ('thumbnail', 'thumb_invalid')),
+        ('video_format', ('video_file_invalid', 'video_content_type_invalid',
+                          'video_mime_type_invalid', 'invalid video', 'video is not',
+                          'video_content_invalid', 'video_invalid')),
+        ('media_dimensions', ('video dimensions', 'photo_invalid_dimensions',
+                              'media_invalid_dimensions')),
+        ('caption', ('caption_too_long', 'caption is too long', 'caption entities')),
+        ('chat_access', ('chat not found', 'chat write forbidden', 'chat_write_forbidden',
+                         'not enough rights', 'have no rights', 'user is deactivated')),
+        ('file_size', ('file is too big', 'file_too_big', 'file_size_invalid')),
+        ('file_parts', ('file_part', 'file parts')),
+        ('local_file', ('realpath failed', 'failed to open', 'failed to stat',
+                        'file not found', 'no such file', 'permission denied')),
+        ('file_reference', ('wrong file identifier', 'invalid file http url',
+                            'failed to get http url', 'file_reference')),
+        ('media_invalid', ('media_invalid', 'media invalid', 'wrong type of the web page content')),
+        ('message_rejected', ('message failed to be sent', 'failed to send message')),
+    ):
+        if any(pattern in description for pattern in patterns):
+            return reason
+    return 'unclassified'
+
+
 def eligible(size):
     return 0 < size <= MAX_LOCAL_BYTES
 
@@ -47,6 +82,8 @@ async def send_local(bot, store, job, source, chat, path, marker, filename,
     intent = store.begin_local_send(job, source, marker)
     started = time.monotonic()
     submitted = False
+    sending = False
+    method = 'sendPhoto' if photo else 'sendVideo' if video else 'sendDocument'
     try:
         handoff = os.getenv('LOCAL_UPLOAD_DIR')
         group = os.getenv('LOCAL_UPLOAD_GROUP')
@@ -68,7 +105,7 @@ async def send_local(bot, store, job, source, chat, path, marker, filename,
             kwargs = dict(chat_id=chat, caption=(marker if caption is None else caption)[:1024], parse_mode=None,
                           read_timeout=3600, write_timeout=60, connect_timeout=10, pool_timeout=30)
             if photo:
-                submitted = True
+                submitted = sending = True
                 reply = await bot.send_photo(photo=named.as_uri(), **kwargs)
                 kind, media = 'photo', reply.photo[-1] if reply.photo else None
             else:
@@ -77,7 +114,7 @@ async def send_local(bot, store, job, source, chat, path, marker, filename,
                     if len(data) >= 200_000:
                         raise ValueError('Thumbnail too large')
                     kwargs['thumbnail'] = InputFile(data, filename='thumbnail.jpg')
-                submitted = True
+                submitted = sending = True
                 if video:
                     reply = await bot.send_video(video=named.as_uri(), **video, **kwargs)
                     kind, media = 'video', reply.video
@@ -85,6 +122,7 @@ async def send_local(bot, store, job, source, chat, path, marker, filename,
                     reply = await bot.send_document(document=named.as_uri(),
                         disable_content_type_detection=True, **kwargs)
                     kind, media = 'document', reply.document
+            sending = False
             if (reply.chat_id != chat or not media or not media.file_id
                     or (not photo and media.file_size != size)):
                 raise DeliveryUnknownError('Local Bot API receipt could not be validated')
@@ -94,13 +132,19 @@ async def send_local(bot, store, job, source, chat, path, marker, filename,
             stats.update(bytes=size, seconds=time.monotonic()-started)
             stats['average_mib'] = size/max(stats['seconds'], .001)/1024**2
             return reply
-    except RetryAfter as exc:
-        store.reject_local_send(intent)
-        delay = exc.retry_after
-        raise LocalBotRateLimitError(int(delay.total_seconds() if hasattr(delay, 'total_seconds') else delay)) from None
-    except (BadRequest, Forbidden, InvalidToken):
-        store.reject_local_send(intent)
-        raise
+    except (RetryAfter, BadRequest, Forbidden, InvalidToken) as exc:
+        if sending:
+            store.reject_local_send(intent)
+            if isinstance(exc, RetryAfter):
+                delay = exc.retry_after
+                raise LocalBotRateLimitError(int(delay.total_seconds() if hasattr(delay, 'total_seconds') else delay)) from None
+            if isinstance(exc, BadRequest):
+                raise LocalBotUploadRejected(method, rejection_reason(exc)) from None
+            raise
+        if not submitted:
+            store.reject_local_send(intent)
+            raise
+        raise DeliveryUnknownError('Check chat before authorizing a retry') from None
     except BaseException as exc:
         # Network timeout/cancellation after submission has an unknown outcome.
         # Never silently switch channels and send the same file again.

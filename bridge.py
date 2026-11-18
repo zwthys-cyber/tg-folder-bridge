@@ -24,7 +24,7 @@ from transport_recovery import Cooldown, error_detail, rate_wait
 from adaptive_speed import AdaptiveSpeed
 from upload_transport import UploadTransport
 from bot_api_config import endpoint, LOCAL
-from local_upload import eligible, send_local, DeliveryUnknownError
+from local_upload import eligible, send_local, DeliveryUnknownError, LocalBotUploadRejected
 from menu_actions import menu_guard, retire_menu
 from content_identity import analyze, preference
 from source_lock import source_lease
@@ -904,6 +904,8 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 }
                 name = type(exc).__name__
                 detail = error_detail(exc, job.get('phase', ''))
+                if isinstance(exc, LocalBotUploadRejected):
+                    detail += f'；{exc.method}：{exc.reason}'
                 if name in explanations:
                     detail += '：' + explanations[name]
                 if self.cooldown.remaining():
@@ -1092,8 +1094,13 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
     async def deliver(self, message, key, marker=None, upload_path=None, attrs=None, preview=False, thumbnail=None, replace_original=False):
         if (upload_path is not None and self.upload_backend == 'hybrid'
                 and eligible(Path(upload_path).stat().st_size)):
-            return await self.deliver_local(message, key, marker, upload_path, attrs,
-                                            preview, thumbnail, replace_original)
+            try:
+                return await self.deliver_local(message, key, marker, upload_path, attrs,
+                                                preview, thumbnail, replace_original)
+            except LocalBotUploadRejected as exc:
+                if exc.reason not in {'local_file', 'file_reference', 'file_parts', 'file_size'}:
+                    raise
+                print(f"本地上传已拒绝，改用中转通道：{self.active['id']} {exc.reason}", flush=True)
         future = asyncio.get_running_loop().create_future()
         self.pending = dict(source=key, future=future, media_key=media_key(message), replace_original=replace_original)
         if marker:
@@ -1149,7 +1156,6 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
             if attribute:
                 video = dict(width=attribute.w, height=attribute.h, duration=int(attribute.duration),
                              supports_streaming=bool(attribute.supports_streaming))
-        stats, failure = {}, ''
         def save(reply, kind, media):
             if preview:
                 self.store.set_preview(job['id'], key, media.file_id)
@@ -1157,19 +1163,34 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 self.store.add_file(job['id'], key, reply, media.file_id, kind,
                     caption=message.raw_text or '', source_media_key=media_key(message),
                     has_thumbnail=bool(getattr(media, 'thumbnail', None)) or kind == 'photo', replace=replace)
+        async def attempt(video_options, thumb):
+            stats, failure = {}, ''
+            try:
+                return await send_local(self.app.bot, self.store, job['id'], key,
+                    self.store.get(job['id'])['owner'], path, marker, filename,
+                    photo=photo, thumbnail=thumb, stats=stats, save=save,
+                    caption=message.raw_text or '', video=video_options)
+            except LocalBotUploadRejected as exc:
+                failure = f'{exc.method}: {exc.reason}'
+                print(f"本地 Bot API 拒绝上传：{job['id']} {failure}", flush=True)
+                raise
+            except BaseException as exc:
+                failure = type(exc).__name__
+                if isinstance(exc, DeliveryUnknownError):
+                    self.blocked = True
+                raise
+            finally:
+                self.store.record_transfer(job['id'], '上传', stats, failure)
+
         try:
-            return await send_local(self.app.bot, self.store, job['id'], key,
-                self.store.get(job['id'])['owner'], path, marker, filename,
-                photo=photo, thumbnail=thumbnail, stats=stats, save=save, caption=message.raw_text or '', video=video)
-        except DeliveryUnknownError:
-            self.blocked = True
-            failure = 'DeliveryUnknownError'
+            return await attempt(video, thumbnail)
+        except LocalBotUploadRejected as exc:
+            if thumbnail and not photo and exc.reason == 'thumbnail':
+                return await attempt(video, None)
+            if video and exc.reason in {'video_format', 'media_dimensions', 'media_invalid',
+                                        'message_rejected', 'unclassified'}:
+                return await attempt(None, None)
             raise
-        except BaseException as exc:
-            failure = type(exc).__name__
-            raise
-        finally:
-            self.store.record_transfer(job['id'], '上传', stats, failure)
 
     async def collect(self, link, job):
         visited = set()
