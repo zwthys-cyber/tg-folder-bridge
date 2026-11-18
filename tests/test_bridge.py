@@ -3,6 +3,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+import transfer_settings
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, patch
@@ -644,6 +645,7 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         from transfer_settings import automatic
         self.bridge.automatic_speed = True
         self.bridge.download_workers = self.bridge.upload_workers = 32
+        transfer_settings.save(self.bridge.settings_file, 32, 32, True)
         self.bridge.tuners['上传'].current = 24
         self.job['phase'] = '上传'
         error = InvalidBufferError((-429).to_bytes(4, 'little', signed=True))
@@ -718,14 +720,15 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
 
     async def test_download_429_does_not_degrade_healthy_upload_settings(self):
         from telethon.errors import InvalidBufferError
+        import transfer_settings
         self.bridge.download_workers, self.bridge.upload_workers = 32, 8
         self.bridge.upload_connections = 2
+        transfer_settings.save(self.bridge.settings_file, 32, 8, upload_connections=2)
         self.job['phase'] = '下载'
         self.bridge.defer_transport(InvalidBufferError((-429).to_bytes(4, 'little', signed=True)), 0)
         self.assertEqual(self.bridge.download_workers, 32)
         self.assertEqual(self.bridge.upload_workers, 8)
         self.assertEqual(self.bridge.upload_connections, 2)
-        import transfer_settings
         self.assertEqual(transfer_settings.connections(self.bridge.settings_file), 2)
         self.assertGreater(self.bridge.cooldown.remaining(), 100)
 
