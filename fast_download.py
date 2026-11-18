@@ -3,6 +3,7 @@ import asyncio
 import time
 import contextlib
 from contextlib import asynccontextmanager
+from functools import partial
 from telethon import functions, types
 from transfer_metrics import TransferMeter
 from transport_recovery import rate_wait
@@ -41,12 +42,23 @@ class WideDownloadUnsupported(RuntimeError):
 async def wide_parts(client, document, offset, stride, count, chunk):
     location = types.InputDocumentFileLocation(document.id, document.access_hash,
                                                document.file_reference, '')
-    for index in range(count):
-        result = await client(functions.upload.GetFileRequest(
-            location, offset + index*stride, chunk, cdn_supported=False))
-        if not isinstance(result, types.upload.File):
-            raise WideDownloadUnsupported('The response requires the SDK download path')
-        yield result.bytes
+    sender = None
+    invoke = client
+    try:
+        if client.session.dc_id != document.dc_id:
+            # Reuse the exported sender managed by our pinned Telethon version.
+            # The normal SDK iterator uses the same borrow/return API.
+            sender = await client._borrow_exported_sender(document.dc_id)
+            invoke = partial(client._call, sender)
+        for index in range(count):
+            result = await invoke(functions.upload.GetFileRequest(
+                location, offset + index*stride, chunk, cdn_supported=False))
+            if not isinstance(result, types.upload.File):
+                raise WideDownloadUnsupported('The response requires the SDK download path')
+            yield result.bytes
+    finally:
+        if sender is not None:
+            await client._return_exported_sender(sender)
 
 
 async def download_file(client, message, stream, progress=None, workers=8, stats=None,
@@ -76,9 +88,11 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
         await standard()
         return
     document = getattr(message, 'document', None)
-    wide = bool(wide and isinstance(document, types.Document)
-                and getattr(getattr(client, 'session', None), 'dc_id', None) == document.dc_id
-                and document.file_reference)
+    home_dc = getattr(getattr(client, 'session', None), 'dc_id', None)
+    wide = bool(wide and home_dc and isinstance(document, types.Document)
+                and document.file_reference and document.dc_id
+                and (home_dc == document.dc_id or all(callable(getattr(client, name, None))
+                     for name in ('_borrow_exported_sender', '_return_exported_sender', '_call'))))
     chunk = (1024 if wide else 512) * 1024
     pool = min(32 if worker_limit else workers, (size+chunk-1)//chunk)
     stride = pool * chunk
@@ -186,9 +200,9 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        if wide and type(exc).__name__ in {'WideDownloadUnsupported', 'FileMigrateError',
+        if wide and type(exc).__name__ in {'WideDownloadUnsupported', 'FileMigrateError', 'DcIdInvalidError',
                 'LimitInvalidError', 'OffsetInvalidError', 'FileReferenceExpiredError',
-                'FileReferenceInvalidError', 'FilerefUpgradeNeededError'}:
+                'FileReferenceInvalidError', 'FilerefUpgradeNeededError', 'DownloadCoverageError'}:
             stream.seek(0)
             stream.truncate(0)
             return await download_file(client, message, stream, progress, workers,

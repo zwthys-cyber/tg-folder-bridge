@@ -6,7 +6,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, Mock
 from telethon import TelegramClient, types
 from telethon.sessions import MemorySession
-from fast_download import DownloadCoverageError, download_file
+from fast_download import DownloadCoverageError, download_file, wide_parts
 
 
 class Iterator:
@@ -123,6 +123,19 @@ class Downloads(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(output.getvalue(), data)
         self.assertEqual(sorted(offsets), list(range(0, len(data), chunk)))
         self.assertEqual(stats['transport'], 'mtproto_1m')
+
+    async def test_cross_dc_sender_is_returned_when_range_closes_early(self):
+        sender = object()
+        client = NS(session=NS(dc_id=5), _borrow_exported_sender=AsyncMock(return_value=sender),
+                    _return_exported_sender=AsyncMock(), _call=AsyncMock(return_value=
+                        types.upload.File(types.storage.FileUnknown(), 0, b'data')))
+        document = NS(id=1, access_hash=2, file_reference=b'ref', dc_id=2)
+        parts = wide_parts(client, document, 0, 1024**2, 2, 1024**2)
+        self.assertEqual(await anext(parts), b'data')
+        await parts.aclose()
+        client._borrow_exported_sender.assert_awaited_once_with(2)
+        self.assertEqual(client._call.await_args.args[0], sender)
+        client._return_exported_sender.assert_awaited_once_with(sender)
 
     async def test_sparse_file_size_cannot_hide_a_missing_range(self):
         data = b'x' * (11 * 1024**2 + 123)
