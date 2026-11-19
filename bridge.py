@@ -951,7 +951,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                         raise
                     if pipeline:
                         await pipeline.close()
-                        job.pop('download_pipeline', None)
+                        job['paused_download_pipeline'] = job.pop('download_pipeline')
                     job['download_recovery_workers'] = 1
                     self.cooldown.defer(max(rate_wait(exc, attempt), 10 * 2**attempt), error_detail(exc, '下载'))
                     await self.await_cooldown(job)
@@ -960,6 +960,15 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
             phase = '复用已下载' if job['download_stats'].get('transport') == 'disk_checkpoint' else '下载'
             self.store.record_transfer(job['id'], phase, job['download_stats'])
             yield path
+            if phase == '下载' and 'download_recovery_workers' in job:
+                limit = job['download_recovery_workers'] * 2
+                if limit >= self.worker_limit('下载'):
+                    job.pop('download_recovery_workers')
+                    pipeline = job.pop('paused_download_pipeline', None)
+                    if pipeline is not None:
+                        job['download_pipeline'] = pipeline
+                else:
+                    job['download_recovery_workers'] = limit
 
     def progress(self, job, label):
         started = time.monotonic()
