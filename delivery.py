@@ -79,7 +79,7 @@ class WholeDelivery:
         if not self.can_view(job,uid):
             await bot.send_message(uid,'文件夹尚未就绪或已移除。')
             return
-        if job['state']!='complete' and not job.get('audit_public'):
+        if job['state']!='complete' and not (job.get('audit_public') or job.get('partial_notice')):
             await bot.send_message(uid,'这个文件夹还在导入，完成后即可发送全部内容。')
             return
         existing=self.store.db.execute("SELECT * FROM deliveries WHERE owner=? AND job=? AND "

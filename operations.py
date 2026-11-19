@@ -170,6 +170,8 @@ class Operations:
         row = self.store.db.execute('SELECT attempts FROM retry_schedule WHERE job=?',(job_id,)).fetchone()
         attempts = min(4, (row[0] if row else 0) + 1)
         next_at = time.time() + 60 * 2**(attempts-1) if attempts <= 3 else 0
+        if (self.store.get(job_id) or {}).get('partial_notice'):
+            next_at = time.time() + 6 * 3600
         with self.store.db:
             self.store.db.execute('INSERT OR REPLACE INTO retry_schedule VALUES(?,?,?)',(job_id,attempts,next_at))
         return int(next_at-time.time())+1 if next_at else None

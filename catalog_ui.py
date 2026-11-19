@@ -26,7 +26,7 @@ def catalog_page(rows, page=1, page_callback_prefix='bridge_catalog', favorites=
     buttons = []
     for i, row in enumerate(selected, 1):
         title = row['title'] or ('文件夹 ' + row['id'][:8])
-        pending = ('，内容核验中' if row.get('audit_public') else
+        pending = (f"可用，{row['partial_notice']}" if row.get('partial_notice') else '，内容核验中' if row.get('audit_public') else
                    '，导入未完成' if row.get('state', 'complete') != 'complete' else '')
         body.append(f"{i}. 📁 {title}（{row['file_count']} 个文件{pending}）")
     for offset in range(0, len(selected), 5):
@@ -65,7 +65,8 @@ def folder_details(job, items, starting=True):
         total = f'{size/divisor:.2f} {unit}'
     # The source convention counts the folder information message as one
     # message in addition to its media entries; navigation is not included.
-    return (f'📁 {title}\n\n📖 内容统计：\n'
+    availability = f"{len(items)} 个文件可用，{job['partial_notice']}\n\n" if job.get('partial_notice') else ''
+    return (f'📁 {title}\n\n{availability}📖 内容统计：\n'
             f'　• 消息数：{len(items)+1} 条\n'
             f'　• 图片数：{counts["photo"]} 张\n'
             f'　• 视频数：{counts["video"]} 个\n'

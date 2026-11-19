@@ -245,7 +245,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
 
     def can_view(self, job, uid):
         return bool(job and ((uid in self.owners and job['owner'] == uid)
-                            or job['state'] == 'complete' or job.get('audit_public')))
+                            or job['state'] == 'complete' or job.get('audit_public') or job.get('partial_notice')))
 
     async def start_command(self, update, context):
         if update.effective_chat.type == 'private':

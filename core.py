@@ -208,7 +208,7 @@ class Store:
         for column in ('audit_requested', 'audit_public'):
             if column not in job_columns:
                 self.db.execute(f'ALTER TABLE jobs ADD COLUMN {column} INTEGER DEFAULT 0')
-        for column in ('source_created_at', 'source_updated_at', 'cover_file_id'):
+        for column in ('source_created_at', 'source_updated_at', 'cover_file_id', 'partial_notice'):
             if column not in job_columns:
                 self.db.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT DEFAULT ''")
         if not had_notices:
@@ -275,10 +275,10 @@ class Store:
             'SELECT * FROM transfer_metrics ORDER BY id DESC LIMIT ?', (limit,))]
 
     def update(self, job, state, expected=None, detail=''):
-        self.db.execute('UPDATE jobs SET state=?,expected=?,detail=?,restart_pending=CASE '
+        self.db.execute("UPDATE jobs SET state=?,expected=?,detail=?,partial_notice=CASE WHEN ?='complete' THEN '' ELSE partial_notice END,restart_pending=CASE "
                         "WHEN ? IN ('queued','running','cooldown') THEN 1 "
                         "WHEN ?='interrupted' THEN restart_pending ELSE 0 END WHERE id=?",
-                        (state, expected, detail, state, state, job))
+                        (state, expected, detail, state, state, state, job))
         self.db.commit()
 
     def get(self, job):
@@ -383,7 +383,7 @@ class Store:
     def favorite_catalog(self, owner):
         return [dict(r) for r in self.db.execute('''SELECT j.*,count(f.file_id) AS file_count
             FROM favorites v JOIN jobs j ON j.id=v.job JOIN files f ON f.job=j.id
-            WHERE v.owner=? AND (j.state='complete' OR j.audit_public=1 OR j.owner=?)
+            WHERE v.owner=? AND (j.state='complete' OR length(j.partial_notice)>0 OR j.audit_public=1 OR j.owner=?)
             GROUP BY j.id ORDER BY j.rowid DESC''', (owner,owner))]
 
     def start_view(self, owner, job, details_sent=False):
@@ -524,7 +524,7 @@ class Store:
     def catalog(self):
         return [dict(x) for x in self.db.execute('''
             SELECT jobs.*, count(files.file_id) AS file_count FROM jobs
-            JOIN files ON files.job=jobs.id WHERE (jobs.state='complete' OR jobs.audit_public=1)
+            JOIN files ON files.job=jobs.id WHERE (jobs.state='complete' OR length(jobs.partial_notice)>0 OR jobs.audit_public=1)
             GROUP BY jobs.id ORDER BY jobs.rowid DESC
         ''')]
 
@@ -534,7 +534,7 @@ class Store:
             coalesce(sum(coalesce(e.kind,f.kind)='video'),0) AS videos
             FROM jobs j JOIN files f ON f.job=j.id LEFT JOIN source_entries e
               ON e.job=f.job AND e.source_chat=f.source_chat AND e.source_message=f.source_message
-            WHERE j.state='complete' OR j.audit_public=1''').fetchone()
+            WHERE j.state='complete' OR length(j.partial_notice)>0 OR j.audit_public=1''').fetchone()
         # Match folder details: media entries plus one information message
         # per folder, excluding navigation and repeated deliveries.
         return dict(folders=row['folders'],messages=row['media']+row['folders'],
@@ -545,7 +545,7 @@ class Store:
             SELECT jobs.*, count(files.file_id) AS file_count FROM jobs
             JOIN files ON files.job=jobs.id
             WHERE instr(lower(jobs.title), lower(?)) > 0
-              AND (jobs.state='complete' OR jobs.audit_public=1 OR (? AND jobs.owner=?))
+              AND (jobs.state='complete' OR length(jobs.partial_notice)>0 OR jobs.audit_public=1 OR (? AND jobs.owner=?))
             GROUP BY jobs.id ORDER BY jobs.rowid DESC
         ''', (query, int(owned), uid))]
 
