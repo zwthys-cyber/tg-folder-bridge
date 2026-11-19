@@ -139,6 +139,15 @@ class Delivery(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.bot.send_video.call_args.kwargs['supports_streaming'])
         self.assertEqual(self.path.read_bytes(),b'original bytes')
 
+    async def test_video_returned_as_document_uses_actual_receipt(self):
+        self.reply.video = None
+        self.bot.send_video = AsyncMock(return_value=self.reply)
+        await send_local(self.bot, self.store, 'job', (101,3), 7, self.path, 'marker',
+                         'original.mov', video={'width': 20},
+                         save=lambda reply,kind,media:self.store.add_file('job',(101,3),reply,media.file_id,kind))
+        self.assertEqual(self.store.files('job')[0]['kind'], 'document')
+        self.bot.send_document.assert_not_awaited()
+
     def test_filename_cannot_escape_handoff_directory(self):
         for name in ('../../secret', '\\root\\secret', '\x00bad', '..', ''):
             self.assertNotIn('/', safe_filename(name))

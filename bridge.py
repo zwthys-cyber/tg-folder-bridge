@@ -657,11 +657,36 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
         if update.effective_chat.type != 'private' or update.effective_user.id not in self.owners:
             raise ApplicationHandlerStop
         job = self.store.get(context.args[0]) if context.args else None
-        if (len(context.args) != 2 or context.args[1] != 'retry' or not job
+        if (len(context.args) != 2 or context.args[1] not in ('retry','received') or not job
                 or job['owner'] != update.effective_user.id):
             await update.message.reply_text('确认聊天里未收到该文件后，使用 /resolve 任务编号 retry。')
         elif self.active or self.pending:
             await update.message.reply_text('请等待当前任务结束后再确认未知上传。')
+        elif context.args[1] == 'received':
+            reply = update.message.reply_to_message
+            kind = 'video' if reply and reply.video else 'document'
+            media = getattr(reply, kind, None)
+            rows = self.store.db.execute("""
+                SELECT i.id,i.source_chat,i.source_message,s.name,s.size
+                FROM local_send_intents i JOIN source_entries s ON s.job=i.job
+                 AND s.source_chat=i.source_chat AND s.source_message=i.source_message
+                WHERE i.job=? AND i.state='pending' AND i.marker LIKE 'bridge:%'
+            """, (job['id'],)).fetchall()
+            if (len(rows) != 1 or not media or reply.chat_id != job['owner']
+                    or not reply.from_user or reply.from_user.id != context.bot.id
+                    or media.file_name != rows[0]['name'] or media.file_size != rows[0]['size']
+                    or self.store.db.execute("SELECT 1 FROM files WHERE (chat=? AND message=?) OR "
+                        "(job=? AND source_chat=? AND source_message=?)",
+                        (reply.chat_id, reply.message_id, job['id'], rows[0]['source_chat'],
+                         rows[0]['source_message'])).fetchone()):
+                await update.message.reply_text('请回复本机器人发送的、与待确认原件匹配的文件。')
+            else:
+                intent = rows[0]
+                self.store.confirm_local_send(intent['id'], lambda: self.store.add_file(
+                    job['id'], (intent['source_chat'], intent['source_message']), reply,
+                    media.file_id, kind, has_thumbnail=bool(media.thumbnail)))
+                self.blocked = False
+                await update.message.reply_text(self.queue_retry(job['owner'], job['id']))
         else:
             self.store.authorize_local_retry(job['id'])
             self.blocked = False

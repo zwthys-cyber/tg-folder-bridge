@@ -118,6 +118,8 @@ async def send_local(bot, store, job, source, chat, path, marker, filename,
                 if video:
                     reply = await bot.send_video(video=named.as_uri(), **video, **kwargs)
                     kind, media = 'video', reply.video
+                    if media is None and getattr(reply, 'document', None):
+                        kind, media = 'document', reply.document
                 else:
                     reply = await bot.send_document(document=named.as_uri(),
                         disable_content_type_detection=True, **kwargs)
