@@ -931,25 +931,35 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
 
     @contextlib.asynccontextmanager
     async def staged_download(self, message, job):
-        recorded = False
-        try:
-            pipeline = job.get('download_pipeline')
-            if pipeline and pipeline.contains(message):
-                stage = pipeline.stage(message,
-                    lambda stats: job.__setitem__('download_stats', stats), self.progress(job, '下载'))
-            else:
-                stage = self.spool.stage(self.client, message, progress=self.progress(job, '下载'),
-                    workers=self.download_workers, stats=job['download_stats'],
-                    worker_limit=lambda: self.worker_limit('下载'), checkpoint_scope=job['id'])
-            async with stage as path:
-                phase = '复用已下载' if job['download_stats'].get('transport') == 'disk_checkpoint' else '下载'
-                self.store.record_transfer(job['id'], phase, job['download_stats'])
-                recorded = True
-                yield path
-        except BaseException as exc:
-            if not recorded:
-                self.store.record_transfer(job['id'], '下载', job['download_stats'], error_detail(exc, '下载'))
-            raise
+        async with contextlib.AsyncExitStack() as stack:
+            for attempt in range(3):
+                pipeline = job.get('download_pipeline')
+                if pipeline and pipeline.contains(message):
+                    stage = pipeline.stage(message,
+                        lambda stats: job.__setitem__('download_stats', stats), self.progress(job, '下载'))
+                else:
+                    limit = job.get('download_recovery_workers', self.download_workers)
+                    stage = self.spool.stage(self.client, message, progress=self.progress(job, '下载'),
+                        workers=limit, stats=job['download_stats'],
+                        worker_limit=lambda: min(limit, self.worker_limit('下载')), checkpoint_scope=job['id'])
+                try:
+                    path = await stack.enter_async_context(stage)
+                    break
+                except BaseException as exc:
+                    self.store.record_transfer(job['id'], '下载', job['download_stats'], error_detail(exc, '下载'))
+                    if attempt == 2 or type(exc).__name__ not in {'FloodWaitError', 'FloodPremiumWaitError'}:
+                        raise
+                    if pipeline:
+                        await pipeline.close()
+                        job.pop('download_pipeline', None)
+                    job['download_recovery_workers'] = 1
+                    self.cooldown.defer(max(rate_wait(exc, attempt), 10 * 2**attempt), error_detail(exc, '下载'))
+                    await self.await_cooldown(job)
+                    self.store.update(job['id'], 'running', job['expected'], '限流等待结束，单路续传当前文件。')
+                    job['download_stats'] = {}
+            phase = '复用已下载' if job['download_stats'].get('transport') == 'disk_checkpoint' else '下载'
+            self.store.record_transfer(job['id'], phase, job['download_stats'])
+            yield path
 
     def progress(self, job, label):
         started = time.monotonic()
