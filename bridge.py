@@ -860,8 +860,10 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 if attempt == 2:
                     raise exc
                 job_id, expected = job['id'], job['expected']
+                refresh_source = (job.get('phase') == '下载' and type(exc).__name__ in
+                                  {'FloodWaitError', 'FloodPremiumWaitError'})
                 job.clear()
-                job.update(id=job_id, expected=expected, chats=set(), baselines={},
+                job.update(refresh_source=refresh_source, id=job_id, expected=expected, chats=set(), baselines={},
                            events=asyncio.Queue(maxsize=5000), overflow=False,
                            dedup_audit=bool(self.store.get(job_id).get('audit_requested')))
 
@@ -1324,7 +1326,9 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
         job['handle_next_groups'] = handle_buttons
 
         plan=[]
-        saved=self.store.saved_source_plan(job['id'],job['expected']) if not job.get('dedup_audit') else []
+        saved = []
+        if not job.get('dedup_audit') and not job.get('refresh_source'):
+            saved = self.store.saved_source_plan(job['id'], job['expected'])
         if saved:
             peers={}
             for name in self.allowed:
@@ -1445,8 +1449,21 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                     if job.get('dedup_audit'):
                         job['audit_unmatched'] = True
                         continue
-                    await self.transfer_media(message, key, job)
+                    try:
+                        await self.transfer_media(message, key, job)
+                    except Exception as exc:
+                        if (job.get('phase') != '下载' or type(exc).__name__ not in
+                                {'FloodWaitError', 'FloodPremiumWaitError'}):
+                            raise
+                        if job.get('deferred_download') or index == len(plan):
+                            raise
+                        job['deferred_download'] = (message, key)
+                        self.cooldown.defer(rate_wait(exc, 0), error_detail(exc, '下载'))
+                        await self.await_cooldown(job)
                 await asyncio.sleep(self.transfer_pause)
+            if job.get('deferred_download'):
+                message, key = job.pop('deferred_download')
+                await self.transfer_media(message, key, job)
         finally:
             job.pop('download_pipeline', None)
             job.pop('reusable_documents', None)
