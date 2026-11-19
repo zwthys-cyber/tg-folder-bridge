@@ -864,6 +864,27 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         await self.bridge.restore_jobs()
         self.assertTrue(self.bridge.jobs.empty())
 
+    async def test_download_flood_retries_only_stage_entry(self):
+        from contextlib import asynccontextmanager
+        from telethon.errors import FloodWaitError
+
+        job = dict(id='job', expected=1, download_stats={})
+        workers = []
+        @asynccontextmanager
+        async def stage(*args, **kwargs):
+            workers.append(kwargs['workers'])
+            if len(workers) == 1:
+                raise FloodWaitError(None, capture=3)
+            yield 'original'
+        with patch.object(self.bridge, 'spool', NS(stage=stage)), patch.object(
+                self.bridge, 'await_cooldown', new_callable=AsyncMock) as wait:
+            with self.assertRaises(FloodWaitError):
+                async with self.bridge.staged_download(NS(), job) as path:
+                    self.assertEqual(path, 'original')
+                    raise FloodWaitError(None, capture=5)
+        self.assertEqual(workers, [self.bridge.download_workers, 1])
+        wait.assert_awaited_once_with(job)
+
     async def test_hybrid_small_file_bypasses_user_relay_and_pending_receipt(self):
         self.bridge.upload_backend = 'hybrid'
         self.bridge.deliver_local = AsyncMock()
