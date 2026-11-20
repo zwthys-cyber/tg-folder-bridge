@@ -50,12 +50,15 @@ class Operations:
     def panel(self, uid):
         root = self.controls_root()
         states = dict(self.store.db.execute('SELECT state,count(*) FROM jobs WHERE owner=? GROUP BY state', (uid,)))
+        failures = self.failed_rows(uid)
+        scheduled = {r[0] for r in self.store.db.execute('SELECT job FROM retry_schedule WHERE next_at>0')}
+        recovering = sum(r['id'] in scheduled and not self.store.unknown_local_send(r['id']) for r in failures)
         disk = shutil.disk_usage(root)
         lines = ['🛠 管理员控制面板',
                  '采集：' + ('已暂停' if control.paused(root, 'collector') else '已启用'),
                  '新转存任务：' + ('已暂停' if control.paused(root, 'transfers') else '已启用'),
                  f"任务：完成 {states.get('complete',0)}，排队 {states.get('queued',0)}，运行 {states.get('running',0)}",
-                 f"待处理失败：{len(self.failed_rows(uid))}",
+                 f"等待自动补收：{recovering}；需人工处理：{len(failures)-recovering}",
                  f'磁盘可用：{disk.free/1024**3:.1f} / {disk.total/1024**3:.1f} GiB',
                  f'并发上限：下载 {self.download_workers}，上传 {self.upload_workers}']
         active = self.active
@@ -147,7 +150,7 @@ class Operations:
                 or (type(error).__name__ not in TRANSIENT and rate_wait(error,0) is None)
                 or self.store.unknown_local_send(job_id)):
             return
-        return self.schedule_attempt(job_id)
+        return self.schedule_attempt(job_id, sustained=rate_wait(error, 0) is not None, minimum=rate_wait(error, 0) or 0)
 
     def schedule_incomplete(self, job):
         """Retry a known short source delivery, never an ambiguous upload or audit."""
@@ -163,23 +166,28 @@ class Operations:
                 or self.completed_duplicate(row)
                 or self.store.processed_count(job_id) >= expected):
             return
-        return self.schedule_attempt(job_id)
+        return self.schedule_attempt(job_id, sustained=True)
 
-    def schedule_attempt(self, job_id):
+    def schedule_attempt(self, job_id, sustained=False, minimum=0):
         # Network failures and short source deliveries share one persistent budget.
         row = self.store.db.execute('SELECT attempts FROM retry_schedule WHERE job=?',(job_id,)).fetchone()
-        attempts = min(4, (row[0] if row else 0) + 1)
-        next_at = time.time() + 60 * 2**(attempts-1) if attempts <= 3 else 0
+        attempts = (row[0] if row else 0) + 1
+        delays = (60, 120, 240, 900, 3600, 21600, 86400)
+        delay = 0
         if (self.store.get(job_id) or {}).get('partial_notice'):
-            next_at = time.time() + 6 * 3600
+            delay = 21600
+        elif attempts <= 3 or sustained:
+            delay = delays[min(attempts, len(delays)) - 1]
+        delay = max(delay, minimum)
+        next_at = time.time() + delay if delay else 0
         with self.store.db:
             self.store.db.execute('INSERT OR REPLACE INTO retry_schedule VALUES(?,?,?)',(job_id,attempts,next_at))
-        return int(next_at-time.time())+1 if next_at else None
+        return delay or None
 
     async def retry_loop(self):
         while True:
             await asyncio.sleep(5)
-            if (self.active or not self.jobs.empty() or self.blocked or self.cooldown.remaining()
+            if (not self.jobs.empty() or self.blocked or self.cooldown.remaining()
                     or control.paused(self.controls_root(),'transfers')):
                 continue
             rows = self.store.db.execute('SELECT job FROM retry_schedule WHERE next_at>0 AND next_at<=? ORDER BY next_at',
@@ -190,7 +198,7 @@ class Operations:
                     with self.store.db:
                         self.store.db.execute('UPDATE retry_schedule SET next_at=0 WHERE job=?',(job_id,))
                     continue
-                if row['owner'] in self.owners:
+                if row['state'] in FAILURES and row['owner'] in self.owners:
                     self.queue_retry(row['owner'],job_id)
                     break
 

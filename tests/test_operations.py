@@ -98,13 +98,13 @@ class OperationsTests(unittest.IsolatedAsyncioTestCase):
         self.app.store=Store(self.root/'index.sqlite3')
         self.assertEqual(self.app.schedule_incomplete(job),120)
         self.assertEqual(self.app.schedule_retry('job',ConnectionError()),240)
-        self.assertIsNone(self.app.schedule_incomplete(job))
-        self.assertIsNone(self.app.schedule_incomplete(job))
-        self.assertEqual(tuple(self.app.store.db.execute('select attempts,next_at from retry_schedule').fetchone()),(4,0))
+        for delay in (900,3600,21600,86400,86400):
+            self.assertEqual(self.app.schedule_incomplete(job),delay)
 
     async def test_exhausted_transport_flood_recovery_gets_bounded_task_retry(self):
         Flood=type('FloodWaitError',(Exception,),{'seconds':10})
         self.assertEqual(self.app.schedule_retry('job',Flood()),60)
+        self.assertEqual(self.app.schedule_retry('job',type('FloodWaitError',(Exception,),{'seconds':1800})()),1800)
         self.app.store.begin_local_send('job',(1,2),'unconfirmed')
         self.assertIsNone(self.app.schedule_retry('job',Flood()))
 
@@ -136,7 +136,8 @@ class OperationsTests(unittest.IsolatedAsyncioTestCase):
         self.app.schedule_incomplete(dict(id='job',expected=3))
         with self.app.store.db:
             self.app.store.db.execute('update retry_schedule set next_at=1')
-        with patch('operations.asyncio.sleep',new=AsyncMock(side_effect=[None,asyncio.CancelledError()])):
+        self.app.active = {'id':'other'}
+        with patch('operations.asyncio.sleep',new=AsyncMock(side_effect=[None,None,asyncio.CancelledError()])):
             with self.assertRaises(asyncio.CancelledError):await self.app.retry_loop()
         self.assertEqual(self.app.jobs.qsize(),1)
         self.assertEqual(self.app.store.get('job')['state'],'queued')

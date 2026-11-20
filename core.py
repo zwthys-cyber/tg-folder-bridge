@@ -236,7 +236,7 @@ class Store:
         return cursor.lastrowid
 
     def unknown_local_send(self, job):
-        return self.db.execute("SELECT 1 FROM local_send_intents WHERE job=? AND state='pending' LIMIT 1",
+        return self.db.execute("SELECT 1 FROM local_send_intents WHERE job=? AND state IN ('pending','unknown') LIMIT 1",
                                (job,)).fetchone() is not None
 
     def reject_local_send(self, intent):

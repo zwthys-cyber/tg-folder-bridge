@@ -909,13 +909,8 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 else:
                     retry_wait = self.schedule_incomplete(job)
                     if retry_wait:
-                        attempt = self.store.db.execute('SELECT attempts FROM retry_schedule WHERE job=?',
-                                                        (job_id,)).fetchone()[0]
-                        detail += (f' 已处理 {n}/{job["expected"]}；约 {retry_wait} 秒后自动排队补收'
-                                   f'（第 {attempt}/3 次），已保存文件会跳过。')
-                    elif self.store.db.execute('SELECT 1 FROM retry_schedule WHERE job=? AND attempts>=4',
-                                               (job_id,)).fetchone():
-                        detail += ' 自动恢复次数已用尽，请管理员检查来源后手动续传。'
+                        detail += (f' 已处理 {n}/{job["expected"]}；约 {retry_wait} 秒后自动排队补收，'
+                                   '已保存文件会跳过。')
                     self.store.update(job_id, 'needs_review', job['expected'], detail)
             except asyncio.CancelledError:
                 self.store.update(job_id, 'interrupted', job['expected'])
@@ -942,7 +937,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 retry_wait = self.schedule_retry(job_id, exc)
                 if retry_wait:
                     self.store.update(job_id, 'partial' if self.store.files(job_id) else 'failed',
-                                      job['expected'], detail + f'；约 {retry_wait} 秒后自动排队重试（最多 3 次）。')
+                                      job['expected'], detail + f'；约 {retry_wait} 秒后自动排队重试。')
             finally:
                 self.pending = None
                 self.active = None
@@ -1344,6 +1339,8 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 self.store.update(job['id'],'running',job['expected'],
                                   f'已载入原来源清单 {len(plan)} 条，只补传尚未保存的文件。')
         cached=bool(plan)
+        awaiting_first_media = False
+        extended_wait = False
         if not cached:await follow(link)
         while not cached:
             if job.get('button_error'):
@@ -1355,7 +1352,12 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
             except asyncio.TimeoutError:
                 if job.get('pending_group_clicks'):
                     continue
+                if awaiting_first_media and not plan and not extended_wait:
+                    extended_wait = True
+                    continue
                 break
+            if '开始发送内容' in (message.raw_text or ''):
+                awaiting_first_media = True
             if not job.get('expected_refreshed'):
                 expected = media_count(message.raw_text or '')
                 if expected is not None:
