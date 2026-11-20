@@ -170,7 +170,7 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         detail=NS(chat_id=101,id=1,raw_text='开始发送内容',photo=None,document=None,buttons=[])
         media=NS(chat_id=101,id=2,raw_text='',photo=None,document=NS(id=123),media=NS(video=False),buttons=[])
         self.bridge.client=NS(get_entity=AsyncMock(return_value=NS(id=101,bot=True)),
-            get_messages=AsyncMock(return_value=[]),send_message=AsyncMock())
+            get_messages=AsyncMock(return_value=[]),send_message=AsyncMock(),disconnect=AsyncMock())
         self.bridge.transfer_media=AsyncMock()
         self.job['expected']=1
         self.job['events']=NS(get=AsyncMock(side_effect=[detail,asyncio.TimeoutError(),media]))
