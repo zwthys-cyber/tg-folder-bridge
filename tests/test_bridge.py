@@ -166,6 +166,18 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
             'SELECT source_message,position FROM source_entries WHERE job=? ORDER BY position',('job',))],
             [(5,1),(6,2),(7,3)])
 
+    async def test_announced_source_waits_one_extra_window_for_first_media(self):
+        detail=NS(chat_id=101,id=1,raw_text='开始发送内容',photo=None,document=None,buttons=[])
+        media=NS(chat_id=101,id=2,raw_text='',photo=None,document=NS(id=123),media=NS(video=False),buttons=[])
+        self.bridge.client=NS(get_entity=AsyncMock(return_value=NS(id=101,bot=True)),
+            get_messages=AsyncMock(return_value=[]),send_message=AsyncMock())
+        self.bridge.transfer_media=AsyncMock()
+        self.job['expected']=1
+        self.job['events']=NS(get=AsyncMock(side_effect=[detail,asyncio.TimeoutError(),media]))
+        await self.bridge.collect('https://t.me/epan?start=s_abc',self.job)
+        self.assertEqual(self.job['events'].get.await_count,3)
+        self.bridge.transfer_media.assert_awaited_once()
+
     async def test_resume_uses_saved_complete_plan_and_only_transfers_missing_media(self):
         self.bridge.allowed={'epan'}
         media=[NS(chat_id=101,id=n,raw_text='',photo=None,document=NS(id=n),media=NS(video=False),buttons=[])

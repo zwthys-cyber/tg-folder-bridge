@@ -893,6 +893,8 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 n = self.store.processed_count(job_id)
                 complete = job['expected'] is not None and n == job['expected'] and not job.get('audit_unmatched')
                 detail = '' if complete else '发送已静默，无法确认全部文件已收到。'
+                if not complete and job.get('source_announced') and job.get('audit_total') == 0:
+                    detail = '来源已回复开始发送，但等待两个静默窗口仍未收到媒体。'
                 if job.get('preview_warnings'):
                     detail += ' 部分 HEIC 预览未生成，原文件已保留。'
                 if job.get('resume_lookup_warnings'):
@@ -1339,7 +1341,6 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 self.store.update(job['id'],'running',job['expected'],
                                   f'已载入原来源清单 {len(plan)} 条，只补传尚未保存的文件。')
         cached=bool(plan)
-        awaiting_first_media = False
         extended_wait = False
         if not cached:await follow(link)
         while not cached:
@@ -1352,12 +1353,12 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
             except asyncio.TimeoutError:
                 if job.get('pending_group_clicks'):
                     continue
-                if awaiting_first_media and not plan and not extended_wait:
+                if job.get('source_announced') and not plan and not extended_wait:
                     extended_wait = True
                     continue
                 break
             if '开始发送内容' in (message.raw_text or ''):
-                awaiting_first_media = True
+                job['source_announced'] = True
             if not job.get('expected_refreshed'):
                 expected = media_count(message.raw_text or '')
                 if expected is not None:
