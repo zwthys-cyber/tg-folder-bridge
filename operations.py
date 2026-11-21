@@ -150,7 +150,8 @@ class Operations:
                 or (type(error).__name__ not in TRANSIENT and rate_wait(error,0) is None)
                 or self.store.unknown_local_send(job_id)):
             return
-        return self.schedule_attempt(job_id, sustained=rate_wait(error, 0) is not None, minimum=rate_wait(error, 0) or 0)
+        server_wait = rate_wait(error, 0)
+        return self.schedule_attempt(job_id, sustained=server_wait is not None, minimum=server_wait or 0)
 
     def schedule_incomplete(self, job):
         """Retry a known short source delivery, never an ambiguous upload or audit."""
@@ -174,7 +175,10 @@ class Operations:
         attempts = (row[0] if row else 0) + 1
         delays = (60, 120, 240, 900, 3600, 21600, 86400)
         delay = 0
-        if (self.store.get(job_id) or {}).get('partial_notice'):
+        if 0 < minimum <= 60:
+            # Brief server cooldowns should not inherit the daily missing-source interval.
+            delay = min(3600, delays[min(attempts, len(delays)) - 1])
+        elif (self.store.get(job_id) or {}).get('partial_notice'):
             delay = 21600
         elif attempts <= 3 or sustained:
             delay = delays[min(attempts, len(delays)) - 1]

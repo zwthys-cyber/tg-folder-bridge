@@ -108,6 +108,15 @@ class OperationsTests(unittest.IsolatedAsyncioTestCase):
         self.app.store.begin_local_send('job',(1,2),'unconfirmed')
         self.assertIsNone(self.app.schedule_retry('job',Flood()))
 
+    async def test_brief_server_wait_after_many_attempts_still_retries_within_an_hour(self):
+        self.app.store.db.execute("insert into retry_schedule values('job',6,0)")
+        flood = type('FloodWaitError',(Exception,),{'seconds':6})()
+        self.assertEqual(self.app.schedule_retry('job', flood), 3600)
+        self.app.store.db.execute("update jobs set partial_notice='缺一项' where id='job'")
+        self.assertEqual(self.app.schedule_retry('job', flood), 3600)
+        long_wait = type('FloodWaitError',(Exception,),{'seconds':90000})()
+        self.assertGreaterEqual(self.app.schedule_retry('job', long_wait), 90000)
+
     async def test_short_delivery_refuses_unsafe_replays(self):
         self.app.store.update('job','needs_review',3)
         for extra in ({'expected':None},{'expected':0},{'dedup_audit':True},
