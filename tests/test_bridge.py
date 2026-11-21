@@ -200,6 +200,28 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.job['download_limited'],2)
         self.bridge.client.send_message.assert_awaited_once()
 
+    async def test_source_history_recovers_media_missing_from_updates(self):
+        detail=NS(chat_id=101,id=2,raw_text='开始发送内容',photo=None,document=None,buttons=[])
+        media=NS(chat_id=101,id=3,raw_text='',photo=None,document=NS(id=123),
+                 media=NS(video=False),buttons=[],out=False)
+        self.bridge.client=NS(get_entity=AsyncMock(return_value=NS(id=101,bot=True)),
+            get_messages=AsyncMock(side_effect=[[],[media]]),
+            send_message=AsyncMock(),disconnect=AsyncMock())
+        self.bridge.transfer_media=AsyncMock()
+        self.job['expected']=1
+        calls=0
+        original_get=self.job['events'].get
+        async def receive():
+            nonlocal calls
+            calls+=1
+            if calls==1:return detail
+            if calls in (2,3):raise asyncio.TimeoutError()
+            return await original_get()
+        self.job['events'].get=receive
+        await self.bridge.collect('https://t.me/epan?start=s_abc',self.job)
+        self.bridge.transfer_media.assert_awaited_once()
+        self.assertEqual(self.bridge.client.get_messages.await_args.kwargs['min_id'],0)
+
     async def test_resume_uses_saved_complete_plan_and_only_transfers_missing_media(self):
         self.bridge.allowed={'epan'}
         media=[NS(chat_id=101,id=n,raw_text='',photo=None,document=NS(id=n),media=NS(video=False),buttons=[])

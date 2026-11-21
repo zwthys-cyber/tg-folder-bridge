@@ -896,7 +896,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 complete = job['expected'] is not None and n == job['expected'] and not job.get('audit_unmatched')
                 detail = '' if complete else '发送已静默，无法确认全部文件已收到。'
                 if not complete and job.get('source_announced') and job.get('audit_total') == 0:
-                    detail = '来源已回复开始发送，但等待两个静默窗口仍未收到媒体。'
+                    detail = '来源已回复开始发送，但等待并核对聊天历史后仍无媒体，已暂缓自动补收。'
                 if job.get('download_limited'):
                     detail += f" {job['download_limited']} 个来源文件下载受限，已暂缓补收，继续后续文件夹。"
                 if job.get('preview_warnings'):
@@ -1346,6 +1346,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                                   f'已载入原来源清单 {len(plan)} 条，只补传尚未保存的文件。')
         cached=bool(plan)
         extended_wait = False
+        history_checked = False
         if not cached:await follow(link)
         while not cached:
             if job.get('button_error'):
@@ -1360,6 +1361,22 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 if job.get('source_announced') and not plan and not extended_wait:
                     extended_wait = True
                     continue
+                if not history_checked:
+                    history_checked = True
+                    recovered = []
+                    for chat in job['chats']:
+                        messages = await self.client.get_messages(
+                            chat, min_id=job['baselines'][chat], limit=5000, reverse=True)
+                        recovered.extend(m for m in messages if m and not getattr(m, 'out', False)
+                                         and m.id > job['baselines'][chat]
+                                         and (m.photo or m.document)
+                                         and (m.chat_id, m.id) not in seen)
+                    for message in recovered:
+                        job['events'].put_nowait(message)
+                    if recovered:
+                        continue
+                if job.get('source_announced') and not plan:
+                    job['source_stalled'] = True
                 break
             if '开始发送内容' in (message.raw_text or ''):
                 job['source_announced'] = True

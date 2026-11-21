@@ -127,7 +127,7 @@ class OperationsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_short_delivery_refuses_unsafe_replays(self):
         self.app.store.update('job','needs_review',3)
-        for extra in ({'expected':None},{'expected':0},{'dedup_audit':True},
+        for extra in ({'expected':None},{'expected':0},{'source_stalled':True},{'dedup_audit':True},
                       {'audit_unmatched':True},{'overflow':True}):
             self.assertIsNone(self.app.schedule_incomplete(dict(id='job',expected=3)|extra))
         self.app.blocked=True
