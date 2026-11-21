@@ -150,8 +150,9 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
                 and (home_dc == document.dc_id or all(callable(getattr(client, name, None))
                      for name in ('_borrow_exported_sender', '_return_exported_sender', '_call'))))
     short = bool(size and size <= 10 * 1024**2)
-    if (workers == 1 or not document or not size
-            or (short and (not wide or size < 2 * 1024**2))):
+    resumable = checkpoint is not None and document is not None and bool(size)
+    if (not document or not size or (workers == 1 and not resumable)
+            or (short and (not wide or size < 2 * 1024**2) and not resumable)):
         await standard()
         return
     chunk = (1024 if wide else 512) * 1024

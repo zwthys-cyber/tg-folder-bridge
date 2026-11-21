@@ -121,7 +121,7 @@ class Spool(unittest.IsolatedAsyncioTestCase):
             blocked = False
             attempts.clear()
             stats = {}
-            async with self.spool.stage(client, self.message, workers=4, stats=stats,
+            async with self.spool.stage(client, self.message, workers=1, stats=stats,
                                         checkpoint_scope='job') as path:
                 self.assertEqual(path.read_bytes(), data)
                 self.assertEqual(stats['resumed_bytes'], len(saved) * chunk)

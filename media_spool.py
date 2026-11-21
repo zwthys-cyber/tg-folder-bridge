@@ -48,7 +48,7 @@ class LimitedWriter(io.BufferedWriter):
 
 
 class MediaSpool:
-    checkpoint_minimum = 128 * 1024**2
+    checkpoint_minimum = 512 * 1024
     checkpoint_lifetime = 24 * 60 * 60
     checkpoint_limit = 2
 
@@ -163,7 +163,7 @@ class MediaSpool:
                 return
             shutil.rmtree(checkpoint)
         partial = checkpoint.with_name(checkpoint.name.replace('ready-', 'partial-', 1)) if checkpoint else None
-        state = PartialDownload() if partial and workers > 1 else None
+        state = PartialDownload() if partial else None
         if state and partial.is_dir():
             self.in_use.add(partial)
             try:
