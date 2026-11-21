@@ -932,6 +932,8 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 }
                 name = type(exc).__name__
                 detail = error_detail(exc, job.get('phase', ''))
+                if job.get('history_timeout'):
+                    detail += '；来源历史核对超过30秒，已暂缓此任务并释放队列。'
                 if isinstance(exc, LocalBotUploadRejected):
                     detail += f'；{exc.method}：{exc.reason}'
                 if name in explanations:
@@ -1371,6 +1373,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                                 limit=min(5000, max(100, (job['expected'] or 0) + 20)),
                                 reverse=True), timeout=30)
                         except asyncio.TimeoutError:
+                            job['history_timeout'] = True
                             raise RuntimeError('来源历史核对超时，已暂缓此任务，继续其他文件夹。') from None
                         recovered.extend(m for m in messages if m and not getattr(m, 'out', False)
                                          and m.id > job['baselines'][chat]
