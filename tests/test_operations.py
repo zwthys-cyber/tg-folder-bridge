@@ -117,6 +117,14 @@ class OperationsTests(unittest.IsolatedAsyncioTestCase):
         long_wait = type('FloodWaitError',(Exception,),{'seconds':90000})()
         self.assertGreaterEqual(self.app.schedule_retry('job', long_wait), 90000)
 
+    async def test_download_flood_is_not_requeued_after_file_recovery(self):
+        self.app.active={'phase':'下载'}
+        flood=type('FloodWaitError',(Exception,),{'seconds':5})()
+        self.assertIsNone(self.app.schedule_retry('job',flood))
+        self.app.store.update('job','needs_review',3)
+        self.assertIsNone(self.app.schedule_incomplete(dict(id='job',expected=3,download_limited=1)))
+        self.assertEqual(self.app.store.db.execute('select count(*) from retry_schedule').fetchone()[0],0)
+
     async def test_short_delivery_refuses_unsafe_replays(self):
         self.app.store.update('job','needs_review',3)
         for extra in ({'expected':None},{'expected':0},{'dedup_audit':True},

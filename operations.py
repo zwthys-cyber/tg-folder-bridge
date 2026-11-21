@@ -150,6 +150,8 @@ class Operations:
                 or (type(error).__name__ not in TRANSIENT and rate_wait(error,0) is None)
                 or self.store.unknown_local_send(job_id)):
             return
+        if (self.active or {}).get('phase') == '下载' and rate_wait(error, 0) is not None:
+            return
         server_wait = rate_wait(error, 0)
         return self.schedule_attempt(job_id, sustained=server_wait is not None, minimum=server_wait or 0)
 
@@ -159,7 +161,7 @@ class Operations:
         expected = job.get('expected')
         if (self.transfer_mode != 'download_upload' or self.blocked
                 or not isinstance(expected, int) or expected <= 0
-                or job.get('dedup_audit') or job.get('audit_unmatched') or job.get('overflow')
+                or job.get('download_limited') or job.get('dedup_audit') or job.get('audit_unmatched') or job.get('overflow')
                 or self.store.unknown_local_send(job_id)):
             return
         row = self.store.get(job_id)

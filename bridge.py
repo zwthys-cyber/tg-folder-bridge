@@ -846,6 +846,8 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 if button_error and rate_wait(button_error, attempt) is not None:
                     exc = button_error
                     job['phase'] = '源机器人翻组'
+                if job.get('phase') == '下载' and rate_wait(exc, attempt) is not None:
+                    raise
                 if not self.defer_transport(exc, attempt):
                     raise exc
                 detail = error_detail(exc, job.get('phase', ''))
@@ -895,6 +897,8 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 detail = '' if complete else '发送已静默，无法确认全部文件已收到。'
                 if not complete and job.get('source_announced') and job.get('audit_total') == 0:
                     detail = '来源已回复开始发送，但等待两个静默窗口仍未收到媒体。'
+                if job.get('download_limited'):
+                    detail += f" {job['download_limited']} 个来源文件下载受限，已暂缓补收，继续后续文件夹。"
                 if job.get('preview_warnings'):
                     detail += ' 部分 HEIC 预览未生成，原文件已保留。'
                 if job.get('resume_lookup_warnings'):
@@ -1458,15 +1462,10 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                         if (job.get('phase') != '下载' or type(exc).__name__ not in
                                 {'FloodWaitError', 'FloodPremiumWaitError'}):
                             raise
-                        if job.get('deferred_download') or index == len(plan):
-                            raise
-                        job['deferred_download'] = (message, key)
+                        job['download_limited'] = job.get('download_limited', 0) + 1
                         self.cooldown.defer(rate_wait(exc, 0), error_detail(exc, '下载'))
                         await self.await_cooldown(job)
                 await asyncio.sleep(self.transfer_pause)
-            if job.get('deferred_download'):
-                message, key = job.pop('deferred_download')
-                await self.transfer_media(message, key, job)
         finally:
             job.pop('download_pipeline', None)
             job.pop('reusable_documents', None)
