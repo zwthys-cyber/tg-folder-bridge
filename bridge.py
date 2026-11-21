@@ -1365,8 +1365,13 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                     history_checked = True
                     recovered = []
                     for chat in job['chats']:
-                        messages = await self.client.get_messages(
-                            chat, min_id=job['baselines'][chat], limit=5000, reverse=True)
+                        try:
+                            messages = await asyncio.wait_for(self.client.get_messages(
+                                chat, min_id=job['baselines'][chat],
+                                limit=min(5000, max(100, (job['expected'] or 0) + 20)),
+                                reverse=True), timeout=30)
+                        except asyncio.TimeoutError:
+                            raise RuntimeError('来源历史核对超时，已暂缓此任务，继续其他文件夹。') from None
                         recovered.extend(m for m in messages if m and not getattr(m, 'out', False)
                                          and m.id > job['baselines'][chat]
                                          and (m.photo or m.document)
