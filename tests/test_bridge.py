@@ -178,6 +178,28 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.job['events'].get.await_count,3)
         self.bridge.transfer_media.assert_awaited_once()
 
+    async def test_exhausted_download_flood_skips_files_without_replaying_source(self):
+        from telethon.errors import FloodWaitError
+        media=[NS(chat_id=101,id=n,raw_text='',photo=None,document=NS(id=n),
+                  media=NS(video=False),buttons=[]) for n in (11,12,13)]
+        async def send(*args):
+            for message in media:
+                await self.job['events'].put(message)
+        self.bridge.client=NS(get_entity=AsyncMock(return_value=NS(id=101,bot=True)),
+            get_messages=AsyncMock(return_value=[]),send_message=AsyncMock(side_effect=send),
+            disconnect=AsyncMock())
+        async def transfer(message,key,job):
+            job['phase']='下载'
+            if message.id in (11,13):
+                raise FloodWaitError(None,capture=1)
+        self.bridge.transfer_media=AsyncMock(side_effect=transfer)
+        self.bridge.await_cooldown=AsyncMock()
+        self.job['expected']=3
+        await self.bridge.collect_with_recovery('https://t.me/epan?start=s_abc',self.job)
+        self.assertEqual(self.bridge.transfer_media.await_count,3)
+        self.assertEqual(self.job['download_limited'],2)
+        self.bridge.client.send_message.assert_awaited_once()
+
     async def test_resume_uses_saved_complete_plan_and_only_transfers_missing_media(self):
         self.bridge.allowed={'epan'}
         media=[NS(chat_id=101,id=n,raw_text='',photo=None,document=NS(id=n),media=NS(video=False),buttons=[])
