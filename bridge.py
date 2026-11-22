@@ -965,7 +965,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
     @contextlib.asynccontextmanager
     async def staged_download(self, message, job):
         async with contextlib.AsyncExitStack() as stack:
-            for attempt in range(3):
+            for attempt in range(2):
                 pipeline = job.get('download_pipeline')
                 if pipeline and pipeline.contains(message):
                     stage = pipeline.stage(message,
@@ -980,7 +980,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                     break
                 except BaseException as exc:
                     self.store.record_transfer(job['id'], '下载', job['download_stats'], error_detail(exc, '下载'))
-                    if attempt == 2 or type(exc).__name__ not in {'FloodWaitError', 'FloodPremiumWaitError'}:
+                    if attempt == 1 or type(exc).__name__ not in {'FloodWaitError', 'FloodPremiumWaitError'}:
                         raise
                     if pipeline:
                         await pipeline.close()
@@ -988,6 +988,21 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                     job['download_recovery_workers'] = 1
                     self.cooldown.defer(max(rate_wait(exc, attempt), 10 * 2**attempt), error_detail(exc, '下载'))
                     await self.await_cooldown(job)
+                    # Refresh a stale reference only from this exact source
+                    # position, and never substitute different media in place.
+                    if getattr(message, 'document', None) is not None:
+                        try:
+                            refreshed = await asyncio.wait_for(self.client.get_messages(
+                                message.chat_id, ids=message.id), timeout=15)
+                        except Exception as refresh_error:
+                            wait = rate_wait(refresh_error, 0)
+                            if wait is not None:
+                                self.cooldown.defer(wait, error_detail(refresh_error, '刷新来源'))
+                                raise refresh_error from exc
+                        else:
+                            if (refreshed and media_key(refreshed) == media_key(message)
+                                    and refreshed.chat_id == message.chat_id and refreshed.id == message.id):
+                                message = refreshed
                     self.store.update(job['id'], 'running', job['expected'], '限流等待结束，单路续传当前文件。')
                     job['download_stats'] = {}
             phase = '复用已下载' if job['download_stats'].get('transport') == 'disk_checkpoint' else '下载'

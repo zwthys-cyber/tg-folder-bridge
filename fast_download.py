@@ -47,6 +47,8 @@ class RequestPacer:
         self.next_request = 0.0
         self.resume_at = 0.0
         self.cooldown_seconds = 0.0
+        self.flood_rounds = 0
+        self.failure = None
 
     def delay(self, now):
         return max(0.0, self.resume_at - now, self.next_request - now)
@@ -174,7 +176,7 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
     next_increase = now + 8 if learned is not None else 0.0
     clean_parts = 0
     stats.update(mode='parallel', workers=limiter.limit(), parts=0, wait_seconds=0.0,
-                 rate_waits=0, cooldown_seconds=0.0, pace_ms=round(interval*1000),
+                 rate_waits=0, flood_rounds=0, cooldown_seconds=0.0, pace_ms=round(interval*1000),
                  pacing_reused=learned is not None)
     transport = ('mtproto_1m_short' if short else 'mtproto_1m') if wide else 'sdk_ranges'
     meter = TransferMeter(stats, size, transport=transport)
@@ -209,6 +211,8 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
                         await asyncio.sleep(delay)
                     try:
                         async with limiter.slot():
+                            if pacer.failure is not None:
+                                raise pacer.failure
                             began = time.monotonic()
                             # A queued range may have acquired its slot after
                             # another request received a rate limit.
@@ -223,13 +227,20 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
                                 wait = rate_wait(error, retries)
                                 if wait is not None:
                                     if pacer.limited(time.monotonic(), began, wait, pace=wide):
+                                        pacer.flood_rounds += 1
                                         # A paced pair can keep a request in flight
                                         # while avoiding two simultaneous starts.
                                         floor = 2 if wide else 1
                                         temporary_limit = max(floor, limiter.limit() // 2)
                                     stats['rate_waits'] += 1
+                                    stats['flood_rounds'] = pacer.flood_rounds
                                     next_increase = pacer.resume_at+8
                                     clean_parts = 0
+                                    # The whole file owns this budget. A separate
+                                    # budget per range multiplies retries by pool
+                                    # size, even after reducing concurrency to one.
+                                    if pacer.flood_rounds >= 2 or wait > 30:
+                                        pacer.failure = error
                                 raise
                         break
                     except StopAsyncIteration:
@@ -238,7 +249,7 @@ async def download_file(client, message, stream, progress=None, workers=8, stats
                         wait = rate_wait(error, retries)
                         if wait is None and isinstance(error, (ConnectionError, asyncio.TimeoutError)):
                             wait = min(2**retries, 15)
-                        if wait is None or retries >= 3:
+                        if wait is None or retries >= 3 or pacer.failure is not None:
                             raise
                         retries += 1
                         stats['retries'] = stats.get('retries', 0)+1

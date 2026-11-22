@@ -55,6 +55,41 @@ class Iterator:
 
 
 class Downloads(unittest.IsolatedAsyncioTestCase):
+    async def test_flood_budget_is_shared_by_queued_ranges_at_single_concurrency(self):
+        from telethon.errors import FloodWaitError
+        calls = 0
+        class BlockedIterator:
+            async def __anext__(self):
+                nonlocal calls
+                calls += 1
+                raise FloodWaitError(None, capture=1)
+            async def close(self):
+                pass
+        stats = {}
+        client = NS(iter_download=lambda *args, **kwargs: BlockedIterator())
+        with self.assertRaises(FloodWaitError):
+            await download_file(client, NS(document=True, file=NS(size=20*1024**2)),
+                io.BytesIO(), workers=8, worker_limit=lambda: 1, stats=stats)
+        self.assertEqual(calls, 2)
+        self.assertEqual(stats['flood_rounds'], 2)
+
+    async def test_long_flood_returns_without_sleeping_or_trying_other_ranges(self):
+        from telethon.errors import FloodWaitError
+        calls = 0
+        class BlockedIterator:
+            async def __anext__(self):
+                nonlocal calls
+                calls += 1
+                raise FloodWaitError(None, capture=60)
+            async def close(self):
+                pass
+        client = NS(iter_download=lambda *args, **kwargs: BlockedIterator())
+        with self.assertRaises(FloodWaitError):
+            await asyncio.wait_for(download_file(client,
+                NS(document=True, file=NS(size=20*1024**2)), io.BytesIO(),
+                workers=8, worker_limit=lambda: 1), timeout=1)
+        self.assertEqual(calls, 1)
+
     async def test_flood_wait_retries_failed_offset_without_discarding_saved_ranges(self):
         from telethon.errors import FloodWaitError
         data = bytes(range(256)) * 45000

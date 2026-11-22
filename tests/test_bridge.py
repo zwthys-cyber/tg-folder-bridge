@@ -941,6 +941,47 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(workers, [self.bridge.download_workers, 1])
         wait.assert_awaited_once_with(job)
 
+    async def test_download_refreshes_only_identical_source_media_and_retries_once(self):
+        from contextlib import asynccontextmanager
+        from telethon.errors import FloodWaitError
+        original = NS(chat_id=101, id=7, document=NS(id=55), photo=None)
+        fresh = NS(chat_id=101, id=7, document=NS(id=55), photo=None)
+        self.bridge.client = NS(get_messages=AsyncMock(return_value=fresh))
+        seen = []
+        @asynccontextmanager
+        async def stage(client, message, **kwargs):
+            seen.append(message)
+            raise FloodWaitError(None, capture=1)
+            yield
+        job = dict(id='job', expected=1, download_stats={})
+        with patch.object(self.bridge, 'spool', NS(stage=stage)), patch.object(
+                self.bridge, 'await_cooldown', new_callable=AsyncMock):
+            with self.assertRaises(FloodWaitError):
+                async with self.bridge.staged_download(original, job):
+                    self.fail('No complete file exists')
+        self.assertEqual(seen, [original, fresh])
+        self.bridge.client.get_messages.assert_awaited_once_with(101, ids=7)
+
+    async def test_download_refresh_cannot_substitute_different_media(self):
+        from contextlib import asynccontextmanager
+        from telethon.errors import FloodWaitError
+        original = NS(chat_id=101, id=7, document=NS(id=55), photo=None)
+        changed = NS(chat_id=101, id=7, document=NS(id=56), photo=None)
+        self.bridge.client = NS(get_messages=AsyncMock(return_value=changed))
+        seen = []
+        @asynccontextmanager
+        async def stage(client, message, **kwargs):
+            seen.append(message)
+            if len(seen) == 1:
+                raise FloodWaitError(None, capture=1)
+            yield 'original'
+        job = dict(id='job', expected=1, download_stats={})
+        with patch.object(self.bridge, 'spool', NS(stage=stage)), patch.object(
+                self.bridge, 'await_cooldown', new_callable=AsyncMock):
+            async with self.bridge.staged_download(original, job) as path:
+                self.assertEqual(path, 'original')
+        self.assertEqual(seen, [original, original])
+
     async def test_hybrid_small_file_bypasses_user_relay_and_pending_receipt(self):
         self.bridge.upload_backend = 'hybrid'
         self.bridge.deliver_local = AsyncMock()
