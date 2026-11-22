@@ -28,6 +28,7 @@ from local_upload import eligible, send_local, DeliveryUnknownError, LocalBotUpl
 from menu_actions import menu_guard, retire_menu
 from content_identity import analyze, preference
 from source_lock import source_lease
+from source_recovery import open_menu_content
 from operations import Operations
 from browse_navigation import BrowseNavigation
 from delivery import WholeDelivery
@@ -932,6 +933,8 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 }
                 name = type(exc).__name__
                 detail = error_detail(exc, job.get('phase', ''))
+                if job.get('menu_recovery_failed'):
+                    detail += '；来源目录恢复取件失败，已暂缓此任务。'
                 if job.get('history_timeout'):
                     detail += '；来源历史核对超过30秒，已暂缓此任务并释放队列。'
                 if isinstance(exc, LocalBotUploadRejected):
@@ -1349,7 +1352,17 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
         cached=bool(plan)
         extended_wait = False
         history_checked = False
-        if not cached:await follow(link)
+        menu_used = False
+        if not cached and self.store.get(job['id']).get('title'):
+            try:
+                menu_used = await asyncio.wait_for(open_menu_content(
+                    self.client, self.store, job, link, self.allowed,
+                    self.settings_file.parent / 'collector.sqlite3'), timeout=120)
+            except Exception:
+                job['menu_recovery_failed'] = True
+                raise RuntimeError('来源目录恢复取件失败，需要核对来源入口。') from None
+        if not cached and not menu_used:
+            await follow(link)
         while not cached:
             if job.get('button_error'):
                 raise job['button_error']
@@ -1386,6 +1399,8 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 if job.get('source_announced') and not plan:
                     job['source_stalled'] = True
                 break
+            if message.id <= job['baselines'].get(message.chat_id, 0):
+                continue
             if '开始发送内容' in (message.raw_text or ''):
                 job['source_announced'] = True
             if not job.get('expected_refreshed'):

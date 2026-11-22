@@ -161,7 +161,7 @@ class Operations:
         expected = job.get('expected')
         if (self.transfer_mode != 'download_upload' or self.blocked
                 or not isinstance(expected, int) or expected <= 0
-                or job.get('source_stalled') or job.get('download_limited') or job.get('dedup_audit') or job.get('audit_unmatched') or job.get('overflow')
+                or job.get('menu_recovery') or job.get('source_stalled') or job.get('download_limited') or job.get('dedup_audit') or job.get('audit_unmatched') or job.get('overflow')
                 or self.store.unknown_local_send(job_id)):
             return
         row = self.store.get(job_id)
