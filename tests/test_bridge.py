@@ -946,7 +946,7 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         from telethon.errors import FloodWaitError
         original = NS(chat_id=101, id=7, document=NS(id=55), photo=None)
         fresh = NS(chat_id=101, id=7, document=NS(id=55), photo=None)
-        self.bridge.client = NS(get_messages=AsyncMock(return_value=fresh))
+        self.bridge.client = NS(get_messages=AsyncMock(return_value=fresh), disconnect=AsyncMock())
         seen = []
         @asynccontextmanager
         async def stage(client, message, **kwargs):
@@ -967,7 +967,7 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         from telethon.errors import FloodWaitError
         original = NS(chat_id=101, id=7, document=NS(id=55), photo=None)
         changed = NS(chat_id=101, id=7, document=NS(id=56), photo=None)
-        self.bridge.client = NS(get_messages=AsyncMock(return_value=changed))
+        self.bridge.client = NS(get_messages=AsyncMock(return_value=changed), disconnect=AsyncMock())
         seen = []
         @asynccontextmanager
         async def stage(client, message, **kwargs):
