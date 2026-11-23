@@ -72,6 +72,10 @@ async def recover_identical_copy(bridge,message,key,job):
     document = getattr(message,'document',None)
     if not isinstance(document,types.Document) or not document.size:
         return False
+    checked = job.setdefault('identity_checked',set())
+    identity = media_key(message)
+    if identity in checked:
+        return False
     owner = bridge.store.get(job['id'])['owner']
     candidates = bridge.store.db.execute('''SELECT f.* FROM files f
         JOIN jobs j ON j.id=f.job
@@ -84,6 +88,7 @@ async def recover_identical_copy(bridge,message,key,job):
         (owner,owner,message.chat_id,document.size,job['id'],*key,job['id'])).fetchall()
     if not candidates:
         return False
+    checked.add(identity)
     await bridge.await_cooldown(job)
     started = time.monotonic()
     deadline = started+180

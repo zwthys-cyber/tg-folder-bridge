@@ -902,9 +902,12 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
             row = self.store.get(job_id)
             refresh_source = job_id in self.source_refresh_requests
             self.source_refresh_requests.discard(job_id)
+            repair_ids = automation_control.read(self.controls_root()).get('repair_pass_jobs',[])
             job = dict(id=job_id, expected=row['expected'], chats=set(), baselines={},
                        events=asyncio.Queue(maxsize=5000), overflow=False,
                        refresh_source=refresh_source,
+                       repair_partial=isinstance(repair_ids,list) and job_id in repair_ids
+                           and bool(self.store.files(job_id)),
                        dedup_audit=bool(row.get('audit_requested')))
             self.active = job
             self.store.update(job_id, 'running', job['expected'])
@@ -1117,6 +1120,10 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 self.store.update(job['id'], 'running', job['expected'], '已复用机器人确认保存的同一原文件。')
                 self.store.record_transfer(job['id'], '复用', dict(bytes=message.file.size, transport='saved_file_id'))
                 return
+            if job.get('repair_partial') and not (preview_only or replace_original or existing):
+                if await recover_identical_copy(self,message,key,job):
+                    return
+                await self.await_cooldown(job)
             job['phase'] = '下载'
             self.store.update(job['id'], 'running', job['expected'], '正在下载一个文件到临时目录。')
             job['download_stats'] = {}

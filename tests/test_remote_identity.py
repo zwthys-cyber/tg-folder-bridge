@@ -120,3 +120,9 @@ class Reuse(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await recover_identical_copy(self.bridge,self.bad,(101,10),self.job))
         self.assertEqual(self.store.files('target'),[])
 
+    async def test_failed_identity_check_is_not_repeated_after_download_failure(self):
+        self.data_by_document[100]=self.data[:-1]+b'!'
+        self.assertFalse(await recover_identical_copy(self.bridge,self.bad,(101,10),self.job))
+        self.assertFalse(await recover_identical_copy(self.bridge,self.bad,(101,10),self.job))
+        self.client.get_messages.assert_awaited_once()
+
