@@ -50,8 +50,31 @@ async def compare_hashes(size, fetch_left, fetch_right, *, max_requests=1024, pr
                 proof_sha256=proof.hexdigest())
 
 
+class HashRequestGate:
+    """Share pacing and a small short-wait budget across both hash streams."""
+    def __init__(self,on_flood=None):
+        self.next_at = 0
+        self.retries = 2
+        self.on_flood = on_flood
+
+    async def run(self,operation):
+        while True:
+            await asyncio.sleep(max(0,self.next_at-time.monotonic()))
+            self.next_at = time.monotonic()+0.35
+            try:
+                return await operation()
+            except Exception as error:
+                wait = rate_wait(error,0)
+                if wait is None or wait>10 or not self.retries:
+                    raise
+                self.retries -= 1
+                if self.on_flood:
+                    self.on_flood(wait,error_detail(error,'内容身份核对'))
+                await asyncio.sleep(wait)
+
+
 @asynccontextmanager
-async def file_hashes(client,document):
+async def file_hashes(client,document,gate=None):
     sender = None
     try:
         if document.dc_id != client.session.dc_id:
@@ -60,8 +83,10 @@ async def file_hashes(client,document):
                                                    document.file_reference,'')
         async def fetch(offset):
             request = functions.upload.GetFileHashesRequest(location,offset)
-            return await asyncio.wait_for(client._call(sender,request,flood_sleep_threshold=0)
-                if sender else client(request),15)
+            async def operation():
+                return await asyncio.wait_for(client._call(sender,request,flood_sleep_threshold=0)
+                    if sender else client(request),15)
+            return await gate.run(operation) if gate else await operation()
         yield fetch
     finally:
         if sender is not None:
@@ -94,6 +119,7 @@ async def recover_identical_copy(bridge,message,key,job):
     deadline = started+180
     metrics = dict(bytes=0,total=document.size,transport='remote_hash_compare')
     failure = 'identity_unverified'
+    gate = HashRequestGate(bridge.cooldown.defer)
     job['phase'] = '核对已保存副本'
     bridge.store.update(job['id'],'running',job['expected'],
         '发现同大小的已保存文件，正在核对完整分段哈希；内容一致后才复用。')
@@ -115,7 +141,7 @@ async def recover_identical_copy(bridge,message,key,job):
                     or not isinstance(candidate.document,types.Document)
                     or candidate.document.size!=document.size):
                 continue
-            async with file_hashes(bridge.client,original.document) as left, file_hashes(bridge.client,candidate.document) as right:
+            async with file_hashes(bridge.client,original.document,gate) as left, file_hashes(bridge.client,candidate.document,gate) as right:
                 last_progress = 0
                 def progress(current,total):
                     nonlocal last_progress

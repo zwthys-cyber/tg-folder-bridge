@@ -4,11 +4,11 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace as NS
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock,patch
 
-from telethon import functions,types
+from telethon import functions,types,errors
 from core import Store
-from remote_identity import compare_hashes,recover_identical_copy
+from remote_identity import compare_hashes,recover_identical_copy,HashRequestGate
 
 
 def ranges(data,chunk=128*1024):
@@ -23,6 +23,24 @@ def fetcher(items):
 
 
 class HashComparison(unittest.IsolatedAsyncioTestCase):
+    async def test_short_wait_retries_same_hash_request_with_shared_bounded_budget(self):
+        flood = errors.FloodWaitError(request=None,capture=5)
+        operation = AsyncMock(side_effect=[flood,b'valid',flood,flood])
+        gate = HashRequestGate()
+        with patch('remote_identity.asyncio.sleep',new_callable=AsyncMock) as sleep:
+            self.assertEqual(await gate.run(operation),b'valid')
+            with self.assertRaises(errors.FloodWaitError):
+                await gate.run(operation)
+        self.assertEqual(operation.await_count,4)
+        self.assertEqual(sum(c.args[0]==5 for c in sleep.await_args_list),2)
+
+    async def test_long_wait_does_not_hold_hash_recovery_loop(self):
+        operation = AsyncMock(side_effect=errors.FloodWaitError(request=None,capture=60))
+        with patch('remote_identity.asyncio.sleep',new_callable=AsyncMock):
+            with self.assertRaises(errors.FloodWaitError):
+                await HashRequestGate().run(operation)
+        operation.assert_awaited_once()
+
     async def test_equal_proof_covers_every_byte_across_response_pages(self):
         data = bytes(range(256))*2400+b'GPS metadata at the very end'
         proof = await compare_hashes(len(data),fetcher(ranges(data)),fetcher(ranges(data)))
