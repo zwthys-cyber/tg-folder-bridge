@@ -9,7 +9,7 @@ from source_recovery import open_menu_content
 
 
 class Recovery(unittest.IsolatedAsyncioTestCase):
-    async def test_observed_menu_recovers_the_verified_folder_and_excludes_cover(self):
+    async def test_observed_menu_recovers_partial_folder_and_excludes_cover(self):
         with tempfile.TemporaryDirectory() as temporary:
             ledger = Path(temporary) / 'collector.sqlite3'
             db = sqlite3.connect(ledger)
@@ -30,7 +30,7 @@ class Recovery(unittest.IsolatedAsyncioTestCase):
             client = NS(get_entity=AsyncMock(return_value=NS(id=101, bot=True)),
                         get_messages=AsyncMock(side_effect=[[NS(id=10)], [home], [NS(id=20)]]),
                         send_message=AsyncMock())
-            store = NS(files=Mock(return_value=[]), set_title=Mock(), set_folder_metadata=Mock())
+            store = NS(files=Mock(return_value=[NS(source_message=3)]), set_title=Mock(), set_folder_metadata=Mock())
             job = dict(id='job', chats=set(), baselines={}, expected=3)
 
             async def click(message, data, predicate):

@@ -12,7 +12,7 @@ from source_catalog import Catalog, MenuChangedError, buttons, list_page, share_
 
 async def open_menu_content(client, store, job, link, allowed, ledger):
     ledger = Path(ledger)
-    if not ledger.exists() or store.files(job['id']) or job.get('dedup_audit'):
+    if not ledger.exists() or job.get('dedup_audit'):
         return False
     with contextlib.closing(sqlite3.connect(ledger.resolve().as_uri() + '?mode=ro', uri=True)) as db:
         rows = db.execute('SELECT source,item_key FROM items WHERE job=? OR link=?',

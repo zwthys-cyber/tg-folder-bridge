@@ -29,6 +29,7 @@ from menu_actions import menu_guard, retire_menu
 from content_identity import analyze, preference
 from source_lock import source_lease
 from source_recovery import open_menu_content
+from reference_repair import repair_reference
 from operations import Operations
 from browse_navigation import BrowseNavigation
 from delivery import WholeDelivery
@@ -54,6 +55,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
         self.timeout = float(os.getenv('JOB_TIMEOUT_SECONDS', '3600'))
         self.transfer_pause = float(os.getenv('TRANSFER_PAUSE_SECONDS', '0.2'))
         self.heic_previews = os.getenv('HEIC_PREVIEWS', '1') == '1'
+        self.reference_repair = os.getenv('REFERENCE_REPAIR', '1') == '1'
         self.document_groups = os.getenv('DISPLAY_MODE', 'document_group') == 'document_group'
         self.upload_workers = int(os.getenv('UPLOAD_WORKERS', '8'))
         self.download_workers = int(os.getenv('DOWNLOAD_WORKERS', '8'))
@@ -773,16 +775,25 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
             if media:
                 if kind == 'photo':
                     media = media[-1]
+                if (pending.get('expected_size') is not None
+                        and (kind == 'photo' or getattr(media, 'file_size', None) != pending['expected_size'])):
+                    pending['future'].set_exception(DeliveryUnknownError('补收回执的文件大小不匹配。'))
+                    raise ApplicationHandlerStop
                 if pending.get('preview'):
                     if kind != 'photo':
                         raise ApplicationHandlerStop
                     self.store.set_preview(self.active['id'], pending['source'], media.file_id)
                 else:
-                    self.store.add_file(self.active['id'], pending['source'], message, media.file_id,
-                                        kind, caption=pending.get('caption'),
-                                        source_media_key=pending.get('media_key', ''),
-                                        has_thumbnail=bool(getattr(media, 'thumbnail', None)) or kind == 'photo',
-                                        replace=pending.get('replace_original', False))
+                    def save():
+                        self.store.add_file(self.active['id'], pending['source'], message, media.file_id,
+                                            kind, caption=pending.get('caption'),
+                                            source_media_key=pending.get('media_key', ''),
+                                            has_thumbnail=bool(getattr(media, 'thumbnail', None)) or kind == 'photo',
+                                            replace=pending.get('replace_original', False))
+                    if pending.get('intent') is not None:
+                        self.store.confirm_local_send(pending['intent'], save)
+                    else:
+                        save()
                 pending['future'].set_result(True)
                 break
         raise ApplicationHandlerStop
@@ -1517,8 +1528,11 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                         if (job.get('phase') != '下载' or type(exc).__name__ not in
                                 {'FloodWaitError', 'FloodPremiumWaitError'}):
                             raise
-                        job['download_limited'] = job.get('download_limited', 0) + 1
                         self.cooldown.defer(rate_wait(exc, 0), error_detail(exc, '下载'))
+                        await self.await_cooldown(job)
+                        if self.reference_repair and await repair_reference(self, message, key, job):
+                            continue
+                        job['download_limited'] = job.get('download_limited', 0) + 1
                         await self.await_cooldown(job)
                 await asyncio.sleep(self.transfer_pause)
         finally:
