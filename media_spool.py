@@ -139,7 +139,7 @@ class MediaSpool:
 
     @asynccontextmanager
     async def stage(self, client, message, progress=None, workers=1, stats=None,
-                    worker_limit=None, checkpoint_scope=None):
+                    worker_limit=None, checkpoint_scope=None, cdn=False):
         size = getattr(getattr(message, 'file', None), 'size', None)
         if size is not None and size > self.max_bytes:
             raise MediaTooLargeError('Media exceeds configured limit')
@@ -194,9 +194,14 @@ class MediaSpool:
             raw = path.open('r+b', buffering=0)
             try:
                 with LimitedWriter(raw, self.root, self.max_bytes, self.reserve_bytes) as stream:
-                    await download_file(client, message, stream, progress=progress, workers=workers,
-                                        stats=stats, worker_limit=worker_limit,
-                                        pacing_history=self.download_pacing, checkpoint=state)
+                    if cdn:
+                        from cdn_download import download_cdn
+                        await download_cdn(client, message, stream, stats=stats if stats is not None else {},
+                                           progress=progress, checkpoint=state)
+                    else:
+                        await download_file(client, message, stream, progress=progress, workers=workers,
+                                            stats=stats, worker_limit=worker_limit,
+                                            pacing_history=self.download_pacing, checkpoint=state)
             except BaseException as error:
                 if state and state.parts and self.recoverable(error):
                     with suppress(OSError):

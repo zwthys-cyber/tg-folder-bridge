@@ -985,7 +985,8 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                     limit = job.get('download_recovery_workers', self.download_workers)
                     stage = self.spool.stage(self.client, message, progress=self.progress(job, '下载'),
                         workers=limit, stats=job['download_stats'],
-                        worker_limit=lambda: min(limit, self.worker_limit('下载')), checkpoint_scope=job['id'])
+                        worker_limit=lambda: min(limit, self.worker_limit('下载')), checkpoint_scope=job['id'],
+                        cdn=bool(attempt and getattr(message, 'document', None)))
                 try:
                     path = await stack.enter_async_context(stage)
                     break
