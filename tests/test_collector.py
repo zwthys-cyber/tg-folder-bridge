@@ -4,10 +4,10 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock,Mock,patch
 from collector_state import Ledger, canonical, existing_jobs
 from core import Store
-from source_catalog import Catalog, share_link, list_page
+from source_catalog import Catalog, share_link, list_page,MenuChangedError
 from source_lock import source_lease
 
 
@@ -184,3 +184,34 @@ class MenuTests(unittest.IsolatedAsyncioTestCase):
         await catalog.page(3)
         self.assertEqual([c.args[1] for c in catalog.click.await_args_list],
                          [b'folders_list_page/2',b'folders_list_page/3'])
+
+    async def test_distant_page_uses_observed_jump_and_rejects_stale_matching_history(self):
+        def listing(identifier,page):
+            return NS(id=identifier,raw_text=f'共1064个文件夹（第{page}/107页）',
+                buttons=[[NS(text='1',data=b'folder/1'),NS(text='跳转',data=b'jump')]])
+        panel=listing(100,107);old=listing(80,1);fresh=listing(121,1)
+        prompt=NS(id=101,raw_text='请输入要跳转的页码',buttons=[])
+        client=NS(send_message=AsyncMock(return_value=NS(id=120)),
+            get_messages=AsyncMock(side_effect=[prompt,[old,fresh]]))
+        catalog=Catalog(client,'source',{'epan'})
+        catalog.find_panel=AsyncMock(return_value=panel)
+        catalog.click=AsyncMock(return_value=prompt)
+        self.assertIs(await catalog.page(1),fresh)
+        client.send_message.assert_awaited_once_with('source','1',reply_to=101)
+        catalog.click.assert_awaited_once()
+        self.assertEqual(catalog.click.await_args.args[1],b'jump')
+
+    async def test_unconfirmed_jump_keeps_cursor_and_does_not_click_old_page(self):
+        panel=NS(id=100)
+        prompt=NS(id=101,raw_text='请输入要跳转的页码')
+        old=NS(id=80,raw_text='共1064个文件夹（第1/107页）',
+               buttons=[[NS(text='1',data=b'folder/1')]])
+        client=NS(send_message=AsyncMock(return_value=NS(id=120)),
+            get_messages=AsyncMock(side_effect=[prompt,[old]]))
+        catalog=Catalog(client,'source',{'epan'},timeout=1)
+        catalog.click=AsyncMock(return_value=prompt)
+        with patch('source_catalog.time',NS(monotonic=Mock(side_effect=[0,0,2]))), \
+                patch('source_catalog.asyncio.sleep',new_callable=AsyncMock):
+            with self.assertRaises(MenuChangedError):
+                await catalog.jump_page(panel,b'jump',1)
+        catalog.click.assert_awaited_once()

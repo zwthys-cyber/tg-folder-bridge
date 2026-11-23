@@ -85,6 +85,9 @@ class Catalog:
             page = list_page(message)
         if not 1<=wanted<=page[1]:
             raise MenuChangedError('目录页码已失效。')
+        jumps = [b for b in buttons(message) if '跳转' in b.text and b.data]
+        if abs(wanted-page[0]) >= 3 and len(jumps)==1:
+            return await self.jump_page(message,jumps[0].data,wanted)
         visited=set()
         while page[0]!=wanted:
             if page[0] in visited:raise MenuChangedError('来源翻页没有前进。')
@@ -101,6 +104,21 @@ class Catalog:
             if target==wanted:return message
             page=list_page(message)
         return message
+
+    async def jump_page(self,panel,data,wanted):
+        prompt = await self.click(panel,data,
+            lambda m:'请输入要跳转的页码' in (m.raw_text or ''))
+        sent = await self.client.send_message(self.source,str(wanted),reply_to=prompt.id)
+        deadline = time.monotonic()+self.timeout
+        while time.monotonic() < deadline:
+            candidates = [await self.client.get_messages(self.source,ids=prompt.id)]
+            candidates += list(await self.client.get_messages(self.source,limit=5))
+            for current in candidates:
+                if (current and (current.id in {prompt.id,panel.id} or current.id>sent.id)
+                        and list_page(current) and list_page(current)[0]==wanted):
+                    return current
+            await asyncio.sleep(0.5)
+        raise MenuChangedError('来源页码跳转未确认，保留采集断点。')
 
     async def scan_page(self, ledger, head=False):
         wanted, _, finished = ledger.page(self.source)
