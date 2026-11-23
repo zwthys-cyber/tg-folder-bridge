@@ -22,10 +22,15 @@ REJECTED = {'ChatForwardsRestrictedError', 'FileReferenceExpiredError',
 
 async def repair_reference(bridge, message, key, job):
     document = getattr(message, 'document', None)
+    protected = (getattr(message, 'noforwards', False)
+                 or getattr(getattr(message, 'chat', None), 'noforwards', False))
+    if protected:
+        bridge.store.record_transfer(job['id'], '云端补收',
+            dict(bytes=0, total=getattr(document, 'size', 0), transport='telegram_reference'),
+            'protected_source')
+        return False
     if (not isinstance(document, types.Document) or not document.file_reference
             or (message.chat_id, message.id) != key
-            or getattr(message, 'noforwards', False)
-            or getattr(getattr(message, 'chat', None), 'noforwards', False)
             or bridge.pending or bridge.blocked):
         return False
     await bridge.await_cooldown(job)

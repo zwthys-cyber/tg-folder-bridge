@@ -50,10 +50,10 @@ def decrypt(key, iv, offset, data):
 
 async def download_cdn(client, message, stream, *, stats, progress=None, checkpoint=None,
                        cdn_factory=open_cdn):
-    document = message.document
-    size = document.size
-    if not isinstance(document, types.Document) or not size:
+    document = getattr(message, 'document', None)
+    if not isinstance(document, types.Document) or not document.size:
         raise ValueError('CDN recovery requires a known original document')
+    size = document.size
     if checkpoint is not None:
         checkpoint.reset()
     stream.seek(0)

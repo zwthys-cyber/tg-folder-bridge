@@ -940,6 +940,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                     'MediaTooLargeError': '单文件超过配置上限，已停止并清理临时文件。',
                     'IncompleteMediaError': '媒体下载不完整，已清理临时文件。',
                     'DownloadCoverageError': '下载分块不完整，已停止并清理临时文件。',
+                    'CdnIntegrityError': 'CDN 内容未通过完整性校验，未写入文件夹，请检查诊断记录。',
                     'ChatForwardsRestrictedError': '源内容禁止转发；如需下载重传，请启用 download_upload 模式。',
                 }
                 name = type(exc).__name__
