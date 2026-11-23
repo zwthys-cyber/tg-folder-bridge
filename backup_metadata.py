@@ -38,7 +38,7 @@ def backup(project, destination, bot_dir=None, keep=7):
             source = data / relative
             if source.exists():
                 snapshot(source, staging / relative)
-        for relative in ('performance.json', 'automation.json', 'rate-limit.json'):
+        for relative in ('performance.json', 'automation.json', 'rate-limit.json', 'repair-batch.json'):
             source = data / relative
             if source.exists():
                 shutil.copyfile(source, staging / relative)

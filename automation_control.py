@@ -37,7 +37,10 @@ def toggle(root, name):
     return values[name + '_paused']
 
 
-def set_paused(root,name,value):
+def set_paused(root,name,value,*,manual=False):
     values=read(root)
     values[name+'_paused']=bool(value)
+    if manual and name == 'collector':
+        values.pop('repair_resume_collector',None)
+        values.pop('repair_pass_jobs',None)
     write(root,values)

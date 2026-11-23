@@ -190,12 +190,39 @@ class Operations:
             self.store.db.execute('INSERT OR REPLACE INTO retry_schedule VALUES(?,?,?)',(job_id,attempts,next_at))
         return delay or None
 
+    def finish_repair_pass(self):
+        """Release our temporary collection pause after one bounded repair pass."""
+        if self.active or not self.jobs.empty() or self.blocked:
+            return False
+        root = self.controls_root()
+        values = control.read(root)
+        ids = values.get('repair_pass_jobs')
+        if (not values.get('repair_resume_collector') or not isinstance(ids,list)
+                or not ids or len(ids)>500 or not all(isinstance(i,str) for i in ids)):
+            return False
+        ids = set(ids)
+        placeholders = ','.join('?' for _ in ids)
+        rows = self.store.db.execute(f'SELECT id,state,restart_pending FROM jobs WHERE id IN ({placeholders})',tuple(ids)).fetchall()
+        if (len(rows)!=len(ids) or any(r['state'] in {'running','queued','cooldown','interrupted'}
+                or r['restart_pending'] for r in rows)):
+            return False
+        if self.store.db.execute(f'SELECT 1 FROM retry_schedule WHERE job IN ({placeholders}) AND next_at>0 LIMIT 1',tuple(ids)).fetchone():
+            return False
+        if self.store.db.execute("SELECT 1 FROM local_send_intents WHERE state IN ('pending','unknown') LIMIT 1").fetchone():
+            return False
+        values.update(collector_paused=False,repair_resume_collector=False)
+        values.pop('repair_pass_jobs',None)
+        control.write(root,values)
+        print('本轮补收已结束，恢复目录采集；未补齐任务继续保留待检查。',flush=True)
+        return True
+
     async def retry_loop(self):
         while True:
             await asyncio.sleep(5)
             if (not self.jobs.empty() or self.blocked or self.cooldown.remaining()
                     or control.paused(self.controls_root(),'transfers')):
                 continue
+            self.finish_repair_pass()
             rows = self.store.db.execute('SELECT job FROM retry_schedule WHERE next_at>0 AND next_at<=? ORDER BY next_at',
                                          (time.time(),)).fetchall()
             for (job_id,) in rows:
@@ -264,7 +291,7 @@ class Operations:
                 if len(parts)!=3 or parts[2] not in {'pause','resume'}:
                     await query.answer('旧控制按钮已过期，请使用更新后的面板。')
                 else:
-                    control.set_paused(self.controls_root(),action,parts[2]=='pause')
+                    control.set_paused(self.controls_root(),action,parts[2]=='pause',manual=True)
                     await query.answer()
             else:
                 await query.answer()

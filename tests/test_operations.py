@@ -47,6 +47,29 @@ class OperationsTests(unittest.IsolatedAsyncioTestCase):
         self.environment.stop()
         self.tmp.cleanup()
 
+    async def test_temporary_repair_pause_releases_only_after_pass_settles(self):
+        control.write(self.root,dict(collector_paused=True,repair_resume_collector=True,
+                                    repair_pass_jobs=['job']))
+        self.app.store.db.execute("INSERT INTO retry_schedule VALUES('job',1,1)")
+        self.app.store.db.commit()
+        self.assertFalse(self.app.finish_repair_pass())
+        self.app.store.db.execute("UPDATE retry_schedule SET next_at=0")
+        self.app.store.db.commit()
+        self.app.store.update('job','queued',3)
+        self.assertFalse(self.app.finish_repair_pass())
+        self.app.store.update('job','partial',3)
+        self.assertTrue(self.app.finish_repair_pass())
+        self.assertFalse(control.paused(self.root,'collector'))
+        self.assertEqual(self.app.store.get('job')['state'],'partial')
+        self.assertFalse(self.app.finish_repair_pass())
+
+    async def test_manual_collection_pause_cancels_automatic_repair_resume(self):
+        control.write(self.root,dict(collector_paused=True,repair_resume_collector=True,
+                                    repair_pass_jobs=['job']))
+        control.set_paused(self.root,'collector',True,manual=True)
+        self.assertFalse(self.app.finish_repair_pass())
+        self.assertTrue(control.paused(self.root,'collector'))
+
     async def test_non_owner_cannot_use_admin_controls(self):
         self.update.effective_user.id=8
         self.update.callback_query=NS(data='bridge_admin:transfers',answer=AsyncMock())
