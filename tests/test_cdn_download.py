@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, patch
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from telethon import functions, types
 from cdn_download import CdnIntegrityError, decrypt, download_cdn, open_cdn
+from download_checkpoint import PartialDownload
+from telethon.errors import FloodWaitError
 
 
 class Cdn(unittest.IsolatedAsyncioTestCase):
@@ -33,6 +35,9 @@ class Cdn(unittest.IsolatedAsyncioTestCase):
             origin_calls.append(request)
             if isinstance(request, functions.upload.GetFileRequest):
                 self.assertTrue(request.cdn_supported)
+                self.assertTrue(request.precise)
+                self.assertEqual(request.limit%1024,0)
+                self.assertLessEqual(request.offset+request.limit,len(data)+1023)
                 if normal:
                     return types.upload.File(types.storage.FileUnknown(),0,data[request.offset:request.offset+request.limit])
                 return redirect
@@ -106,4 +111,30 @@ class Cdn(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(create.call_args.kwargs['receive_updates'])
         self.assertEqual(create.call_args.kwargs['device_model'],'media-transfer')
         trust.assert_called_once_with('trusted-key',old=False)
+
+    async def test_recovery_keeps_valid_ranges_and_fetches_only_precise_tail(self):
+        data,message,source,cdn,factory,calls = await self.fixture(normal=True)
+        state = PartialDownload();state.begin(1024**2);state.record(0,data[:1024**2])
+        output,stats = io.BytesIO(data[:1024**2]),{}
+        await download_cdn(source,message,output,stats=stats,checkpoint=state,cdn_factory=factory)
+        self.assertEqual(output.getvalue(),data)
+        self.assertEqual(len(calls),1)
+        self.assertEqual(calls[0].offset,1024**2)
+        self.assertEqual(calls[0].limit,((len(data)-1024**2+1023)//1024)*1024)
+        self.assertEqual(stats['resumed_bytes'],1024**2)
+        self.assertEqual(stats['bytes'],len(data)-1024**2)
+
+    async def test_late_flood_preserves_verified_prefix_for_next_attempt(self):
+        data,message,source,cdn,factory,calls = await self.fixture(normal=True)
+        original = source._call
+        async def limited(sender,request,**kwargs):
+            if request.offset:
+                raise FloodWaitError(None,capture=5)
+            return await original(sender,request,**kwargs)
+        source._call = limited
+        state = PartialDownload();output = io.BytesIO()
+        with self.assertRaises(FloodWaitError):
+            await download_cdn(source,message,output,stats={},checkpoint=state,cdn_factory=factory)
+        self.assertEqual(output.getvalue(),data[:1024**2])
+        self.assertEqual(state.parts,{0:hashlib.sha256(data[:1024**2]).hexdigest()})
 

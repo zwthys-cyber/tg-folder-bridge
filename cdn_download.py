@@ -55,11 +55,17 @@ async def download_cdn(client, message, stream, *, stats, progress=None, checkpo
         raise ValueError('CDN recovery requires a known original document')
     size = document.size
     if checkpoint is not None:
-        checkpoint.reset()
-    stream.seek(0)
-    stream.truncate(0)
-    stats.update(workers=1, parts=0, wait_seconds=0.0, resumed_bytes=0)
+        checkpoint.begin(1024**2)
+    saved = frozenset(checkpoint.parts) if checkpoint is not None else frozenset()
+    resumed = sum(min(1024**2,size-offset) for offset in saved)
+    if not saved:
+        stream.seek(0)
+        stream.truncate(0)
+    stats.update(workers=1, parts=0, wait_seconds=0.0, resumed_bytes=resumed)
     meter = TransferMeter(stats, size, transport='mtproto_cdn_capable')
+    completed = resumed
+    if resumed and progress:
+        progress(resumed,size)
     location = types.InputDocumentFileLocation(document.id, document.access_hash,
                                                document.file_reference, '')
     sender = None
@@ -69,22 +75,32 @@ async def download_cdn(client, message, stream, *, stats, progress=None, checkpo
             return await asyncio.wait_for(client(request), 30)
         return await asyncio.wait_for(client._call(sender, request, flood_sleep_threshold=0), 30)
     def write(offset, data, began):
+        nonlocal completed
         stream.seek(offset)
         stream.write(data)
+        if checkpoint is not None:
+            checkpoint.record(offset,data)
+        completed += len(data)
         stats['parts'] += 1
         stats['wait_seconds'] += time.monotonic()-began
-        meter.update(offset+len(data), time.monotonic()-began)
+        meter.update(completed-resumed, time.monotonic()-began)
         if progress:
-            progress(offset+len(data), size)
+            progress(completed, size)
     try:
         if document.dc_id != client.session.dc_id:
             sender = await asyncio.wait_for(client._borrow_exported_sender(document.dc_id), 30)
         offset = 0
         redirect = None
         while offset < size:
+            if offset in saved:
+                offset += min(1024**2,size-offset)
+                continue
             began = time.monotonic()
+            # precise permits 1 KiB-aligned tail requests without rounding the
+            # remainder up to a complete 1 MiB range beyond the file's end.
+            limit = ((min(1024**2,size-offset)+1023)//1024)*1024
             result = await origin(functions.upload.GetFileRequest(location,
-                offset, 1024**2, cdn_supported=True))
+                offset, limit, precise=True, cdn_supported=True))
             if isinstance(result, types.upload.FileCdnRedirect):
                 redirect = result
                 break
@@ -97,6 +113,9 @@ async def download_cdn(client, message, stream, *, stats, progress=None, checkpo
             stats['transport'] = 'telegram_cdn_verified'
             hashes = {h.offset: h for h in redirect.file_hashes}
             while offset < size:
+                if offset in saved:
+                    offset += min(1024**2,size-offset)
+                    continue
                 began = time.monotonic()
                 reuploads = 0
                 while True:
@@ -134,6 +153,8 @@ async def download_cdn(client, message, stream, *, stats, progress=None, checkpo
                     checked += length
                 write(offset, block, began)
                 offset += len(block)
+        if completed != size:
+            raise CdnIntegrityError('Recovered file coverage is incomplete')
         stream.flush()
     finally:
         meter.finish()
