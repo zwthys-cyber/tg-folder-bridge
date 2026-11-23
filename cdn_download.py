@@ -98,42 +98,40 @@ async def download_cdn(client, message, stream, *, stats, progress=None, checkpo
             hashes = {h.offset: h for h in redirect.file_hashes}
             while offset < size:
                 began = time.monotonic()
-                if offset not in hashes:
-                    for item in await origin(functions.upload.GetCdnFileHashesRequest(
-                            redirect.file_token, offset)):
-                        hashes[item.offset] = item
-                item = hashes.get(offset)
-                if (item is None or item.offset != offset or not 0 < item.limit <= 1024**2
-                        or len(item.hash) != 32 or offset % 4096):
-                    raise CdnIntegrityError('Missing or invalid trusted CDN hash')
-                required = min(item.limit, size-offset)
-                block = bytearray()
                 reuploads = 0
-                while len(block) < required:
-                    position = offset + len(block)
-                    remaining = required-len(block)
-                    limit = min(128*1024, 1 << max(12, (remaining-1).bit_length()))
-                    boundary = 1024**2-position%(1024**2)
-                    limit = min(limit, 1 << (boundary.bit_length()-1))
+                while True:
                     result = await asyncio.wait_for(cdn._call(cdn._sender,
-                        functions.upload.GetCdnFileRequest(redirect.file_token, position, limit),
+                        functions.upload.GetCdnFileRequest(redirect.file_token, offset, 1024**2),
                         flood_sleep_threshold=0), 30)
-                    if isinstance(result, types.upload.CdnFileReuploadNeeded):
-                        reuploads += 1
-                        if reuploads > 2:
-                            raise CdnIntegrityError('CDN repeatedly requested reupload')
-                        for trusted in await origin(functions.upload.ReuploadCdnFileRequest(
-                                redirect.file_token, result.request_token)):
+                    if not isinstance(result, types.upload.CdnFileReuploadNeeded):
+                        break
+                    reuploads += 1
+                    if reuploads > 2:
+                        raise CdnIntegrityError('CDN repeatedly requested reupload')
+                    for trusted in await origin(functions.upload.ReuploadCdnFileRequest(
+                            redirect.file_token, result.request_token)):
+                        hashes[trusted.offset] = trusted
+                required = min(1024**2, size-offset)
+                if not isinstance(result, types.upload.CdnFile) or len(result.bytes) != required:
+                    raise CdnIntegrityError('CDN download did not cover the expected range')
+                block = decrypt(redirect.encryption_key, redirect.encryption_iv, offset, result.bytes)
+                checked = 0
+                while checked < len(block):
+                    position = offset + checked
+                    if position not in hashes:
+                        for trusted in await origin(functions.upload.GetCdnFileHashesRequest(
+                                redirect.file_token, position)):
                             hashes[trusted.offset] = trusted
-                        continue
-                    wanted = min(remaining, limit)
-                    if (not isinstance(result, types.upload.CdnFile)
-                            or not wanted <= len(result.bytes) <= limit):
-                        raise CdnIntegrityError('CDN download did not cover the expected range')
-                    block.extend(decrypt(redirect.encryption_key, redirect.encryption_iv,
-                                         position, result.bytes[:wanted]))
-                if hashlib.sha256(block).digest() != item.hash:
-                    raise CdnIntegrityError('CDN hash verification failed')
+                    item = hashes.get(position)
+                    if (item is None or item.offset != position or not 0 < item.limit <= 1024**2
+                            or len(item.hash) != 32):
+                        raise CdnIntegrityError('Missing or invalid trusted CDN hash')
+                    length = min(item.limit, size-position)
+                    if length > len(block)-checked:
+                        raise CdnIntegrityError('CDN hash crosses an unsupported block boundary')
+                    if hashlib.sha256(block[checked:checked+length]).digest() != item.hash:
+                        raise CdnIntegrityError('CDN hash verification failed')
+                    checked += length
                 write(offset, block, began)
                 offset += len(block)
         stream.flush()

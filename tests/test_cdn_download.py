@@ -19,7 +19,7 @@ class Cdn(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decrypt(key, iv, 0xfcfdfeff*16, cipher), plain)
 
     async def fixture(self, *, corrupt=False, missing_hash=False, reupload=False, normal=False):
-        data = bytes(range(256))*512+b'short final block!'
+        data = bytes(range(256))*5000+b'short final block!'
         chunk = 128*1024
         key, iv = bytes(range(32)), bytes(range(16))
         hashes = [types.FileHash(offset, min(chunk, len(data)-offset),
@@ -34,7 +34,7 @@ class Cdn(unittest.IsolatedAsyncioTestCase):
             if isinstance(request, functions.upload.GetFileRequest):
                 self.assertTrue(request.cdn_supported)
                 if normal:
-                    return types.upload.File(types.storage.FileUnknown(),0,data)
+                    return types.upload.File(types.storage.FileUnknown(),0,data[request.offset:request.offset+request.limit])
                 return redirect
             self.assertIsInstance(request, (functions.upload.GetCdnFileHashesRequest,
                                            functions.upload.ReuploadCdnFileRequest))
