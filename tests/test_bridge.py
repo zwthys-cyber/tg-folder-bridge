@@ -178,6 +178,30 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.job['events'].get.await_count,3)
         self.bridge.transfer_media.assert_awaited_once()
 
+    async def test_explicit_fresh_manifest_skips_existing_media_at_new_source_positions(self):
+        old = [NS(chat_id=101,id=i,document=NS(id=k),photo=None)
+               for i,k in ((5,100),(6,200))]
+        self.bridge.store.update('job','needs_review',2)
+        self.bridge.store.save_source_plan('job',old)
+        self.bridge.store.add_file('job',(101,5),NS(chat_id=7,message_id=88),
+            'confirmed-original','document',source_media_key='document:100')
+        fresh = [NS(chat_id=101,id=i,raw_text='',document=NS(id=k),photo=None,
+                    media=NS(video=False),buttons=[]) for i,k in ((11,100),(12,200))]
+        async def send(*args):
+            for message in fresh:
+                await self.job['events'].put(message)
+        self.bridge.client = NS(get_entity=AsyncMock(return_value=NS(id=101,bot=True)),
+            get_messages=AsyncMock(return_value=[]),send_message=AsyncMock(side_effect=send),
+            disconnect=AsyncMock())
+        self.bridge.transfer_media = AsyncMock()
+        self.job.update(expected=2,refresh_source=True)
+        await self.bridge.collect('https://t.me/epan?start=s_abc',self.job)
+        self.assertEqual(self.bridge.transfer_media.await_count,1)
+        self.assertEqual(self.bridge.transfer_media.call_args.args[1],(101,12))
+        self.assertEqual(self.bridge.store.files('job')[0]['file_id'],'confirmed-original')
+        self.bridge.client.send_message.assert_awaited_once()
+        self.assertEqual(self.bridge.store.saved_source_plan('job',2),[(101,11),(101,12)])
+
     async def test_exhausted_download_flood_skips_files_without_replaying_source(self):
         from telethon.errors import FloodWaitError
         media=[NS(chat_id=101,id=n,raw_text='',photo=None,document=NS(id=n),

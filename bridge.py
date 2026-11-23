@@ -56,6 +56,10 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
         self.transfer_pause = float(os.getenv('TRANSFER_PAUSE_SECONDS', '0.2'))
         self.heic_previews = os.getenv('HEIC_PREVIEWS', '1') == '1'
         self.reference_repair = os.getenv('REFERENCE_REPAIR', '1') == '1'
+        # Explicit operator request, consumed once per task in this process.
+        # Refreshing a source manifest still skips all confirmed media IDs.
+        self.source_refresh_requests = {value.strip() for value in
+            os.getenv('SOURCE_REFRESH_ONCE', '').split(',') if value.strip()}
         self.document_groups = os.getenv('DISPLAY_MODE', 'document_group') == 'document_group'
         self.upload_workers = int(os.getenv('UPLOAD_WORKERS', '8'))
         self.download_workers = int(os.getenv('DOWNLOAD_WORKERS', '8'))
@@ -874,8 +878,9 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 if attempt == 2:
                     raise exc
                 job_id, expected = job['id'], job['expected']
-                refresh_source = (job.get('phase') == '下载' and type(exc).__name__ in
-                                  {'FloodWaitError', 'FloodPremiumWaitError'})
+                refresh_source = (job.get('refresh_source') or
+                                  (job.get('phase') == '下载' and type(exc).__name__ in
+                                   {'FloodWaitError', 'FloodPremiumWaitError'}))
                 job.clear()
                 job.update(refresh_source=refresh_source, id=job_id, expected=expected, chats=set(), baselines={},
                            events=asyncio.Queue(maxsize=5000), overflow=False,
@@ -891,8 +896,11 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 self.jobs.task_done()
                 continue
             row = self.store.get(job_id)
+            refresh_source = job_id in self.source_refresh_requests
+            self.source_refresh_requests.discard(job_id)
             job = dict(id=job_id, expected=row['expected'], chats=set(), baselines={},
                        events=asyncio.Queue(maxsize=5000), overflow=False,
+                       refresh_source=refresh_source,
                        dedup_audit=bool(row.get('audit_requested')))
             self.active = job
             self.store.update(job_id, 'running', job['expected'])
