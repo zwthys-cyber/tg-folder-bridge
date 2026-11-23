@@ -1,6 +1,8 @@
 # 加密恢复备份
 
-最新恢复快照：`recovery-20261123T143537Z.tgz.gpg`，生成于 2026-11-23 14:35 UTC，对应程序版本 `2d36273`。另保留 11 月 22 日的元数据快照。
+最新恢复快照：`recovery-20261123T231505Z.tgz.gpg`，生成于 2026-11-23 23:15 UTC，对应程序版本 `6f1ab36`。另保留 11 月 22 日的元数据快照。
+
+此快照的来源目录已采集 107/107 页，包含 1064 个唯一分享链接；其中 154 个新链接仍待转存。目录采集完成不代表所有媒体已上传完成，恢复时按保存的任务状态继续。
 
 恢复备份包含转存索引、采集账本、收藏、订阅、任务与补收状态、机器人配置、登录会话、原搜索资源库，以及 Codespaces 的启动脚本、Supervisor 配置和 Linux x86_64 本地 Bot API 可执行文件。照片、视频、下载缓存和日志不在备份内。照片与视频由 Telegram 保存，备份中的文件索引用于重新取回这些资源。
 
@@ -10,7 +12,7 @@
 
 ```bash
 sha256sum -c SHA256SUMS
-gpg --batch --pinentry-mode loopback --passphrase-file /path/to/private/key.txt --output /path/to/private/recovery.tgz --decrypt recovery-20261123T143537Z.tgz.gpg
+gpg --batch --pinentry-mode loopback --passphrase-file /path/to/private/key.txt --output /path/to/private/recovery.tgz --decrypt recovery-20261123T231505Z.tgz.gpg
 ```
 
 恢复时先停止旧实例，避免两处同时轮询机器人或使用中转会话。在私有目录解压，目录权限设为 0700，敏感文件设为 0600；不要把解密内容放进公开仓库。
