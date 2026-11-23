@@ -62,13 +62,15 @@ async def open_menu_content(client, store, job, link, allowed, ledger):
             raise MenuChangedError('来源目录缺少跳转入口')
         prompt = await catalog.click(panel, jumps[0].data,
                                      lambda m: '请输入要跳转的页码' in (m.raw_text or ''))
-        await client.send_message(peer, str(wanted))
+        sent = await client.send_message(peer, str(wanted), reply_to=prompt.id)
         deadline = time.monotonic() + 15
         found = None
         while time.monotonic() < deadline:
             candidates = [await client.get_messages(peer, ids=prompt.id)]
             candidates += list(await client.get_messages(peer, limit=5))
-            found = next((m for m in candidates if m and list_page(m)
+            found = next((m for m in candidates if m
+                          and (m.id in {prompt.id,panel.id} or m.id > sent.id)
+                          and list_page(m)
                           and list_page(m)[0] == wanted), None)
             if found:
                 break
@@ -78,6 +80,26 @@ async def open_menu_content(client, store, job, link, allowed, ledger):
         panel = found
     candidates = [b for b in buttons(panel) if b.data
                   and b.data.decode(errors='replace').split('/')[:2] == [action, folder]]
+    # Head insertions move existing folders across page boundaries. Walk only
+    # buttons actually present in the live keyboard, then verify the share link.
+    if not candidates:
+        total = list_page(panel)[1]
+        for nearby in (wanted+1, wanted-1):
+            if not 1 <= nearby <= total:
+                continue
+            while list_page(panel)[0] != nearby:
+                current = list_page(panel)[0]
+                following = current + (1 if nearby > current else -1)
+                navigation = [b for b in buttons(panel)
+                              if b.data == f'folders_list_page/{following}'.encode()]
+                if len(navigation) != 1:
+                    raise MenuChangedError('来源目录缺少相邻页入口')
+                panel = await catalog.click(panel, navigation[0].data,
+                    lambda m: bool(list_page(m) and list_page(m)[0] == following))
+            candidates = [b for b in buttons(panel) if b.data
+                          and b.data.decode(errors='replace').split('/')[:2] == [action, folder]]
+            if candidates:
+                break
     if len(candidates) != 1:
         raise MenuChangedError('目录已更新，原文件夹不在记录页码')
     target = canonical(link, allowed)

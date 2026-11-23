@@ -29,6 +29,7 @@ from menu_actions import menu_guard, retire_menu
 from content_identity import analyze, preference
 from source_lock import source_lease
 from source_recovery import open_menu_content
+from source_catalog import MenuChangedError
 from reference_repair import repair_reference
 from operations import Operations
 from browse_navigation import BrowseNavigation
@@ -955,6 +956,8 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 detail = error_detail(exc, job.get('phase', ''))
                 if job.get('menu_recovery_failed'):
                     detail += '；来源目录恢复取件失败，已暂缓此任务。'
+                    if job.get('menu_recovery_reason'):
+                        detail += ' ' + job['menu_recovery_reason']
                 if job.get('history_timeout'):
                     detail += '；来源历史核对超过30秒，已暂缓此任务并释放队列。'
                 if isinstance(exc, LocalBotUploadRejected):
@@ -1394,8 +1397,10 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 menu_used = await asyncio.wait_for(open_menu_content(
                     self.client, self.store, job, link, self.allowed,
                     self.settings_file.parent / 'collector.sqlite3'), timeout=120)
-            except Exception:
+            except Exception as error:
                 job['menu_recovery_failed'] = True
+                job['menu_recovery_reason'] = (str(error) if isinstance(error, MenuChangedError)
+                                                else error_detail(error, '来源目录'))
                 raise RuntimeError('来源目录恢复取件失败，需要核对来源入口。') from None
         if not cached and not menu_used:
             await follow(link)
