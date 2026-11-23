@@ -95,7 +95,10 @@ async def file_hashes(client,document,gate=None):
 
 async def recover_identical_copy(bridge,message,key,job):
     document = getattr(message,'document',None)
-    if not isinstance(document,types.Document) or not document.size:
+    # Hash metadata is paged by the origin service. Keep this optional recovery
+    # below its wall-clock budget; larger originals continue through transfer.
+    if (not isinstance(document,types.Document)
+            or not 0 < document.size <= 128*1024**2):
         return False
     checked = job.setdefault('identity_checked',set())
     identity = media_key(message)

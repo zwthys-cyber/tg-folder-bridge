@@ -133,6 +133,11 @@ class Reuse(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await recover_identical_copy(self.bridge,self.bad,(101,10),self.job))
         self.client.get_messages.assert_not_awaited()
 
+    async def test_large_original_does_not_spend_minutes_in_optional_hash_probe(self):
+        self.bad.document.size=129*1024**2
+        self.assertFalse(await recover_identical_copy(self.bridge,self.bad,(101,10),self.job))
+        self.client.get_messages.assert_not_awaited()
+
     async def test_edited_source_position_is_not_treated_as_the_original(self):
         self.good.document.id=300
         self.assertFalse(await recover_identical_copy(self.bridge,self.bad,(101,10),self.job))
