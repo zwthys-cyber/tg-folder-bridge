@@ -31,6 +31,7 @@ from source_lock import source_lease
 from source_recovery import open_menu_content
 from source_catalog import MenuChangedError
 from reference_repair import repair_reference
+from remote_identity import recover_identical_copy
 from operations import Operations
 from browse_navigation import BrowseNavigation
 from delivery import WholeDelivery
@@ -613,11 +614,13 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
             routes = (f"\n原通道 {m.get('control_mib', 0):.2f} MiB/s，媒体连接 "
                       f"{m.get('dedicated_mib', 0):.2f} MiB/s，选择 {m['route_choice']}"
                       if m.get('route_choice') else '')
+            verified = (f"\n已核对全部 {m['hash_ranges']} 个哈希范围，确认同一原件 {m['verified_bytes']/1024**2:.1f} MiB"
+                        if m.get('verified_bytes') else '')
             lines.append(f"{row['at']} UTC · {row['phase']} · {row['job']}\n"
                 f"{m.get('bytes', 0)/1024**2:.1f} MiB / {m.get('seconds', 0):.1f} 秒 · "
                 f"{m.get('average_mib', 0):.2f} MiB/s\n"
                 f"{m.get('transport', '?')} · {m.get('connections', 1)} 连接 · "
-                f"p95 {m.get('p95_ms', 0):.0f} ms · 分块续传 {m.get('retries', 0)} 次 · {m.get('error') or '阶段完成'}{cooldown}{routes}")
+                f"p95 {m.get('p95_ms', 0):.0f} ms · 分块续传 {m.get('retries', 0)} 次 · {m.get('error') or '阶段完成'}{cooldown}{routes}{verified}")
         if len(lines) == 1:
             lines.append('还没有新版本的传输记录，当前文件完成后可查看。')
         await update.message.reply_text('\n\n'.join(lines))
@@ -1545,6 +1548,8 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                             raise
                         self.cooldown.defer(rate_wait(exc, 0), error_detail(exc, '下载'))
                         await self.await_cooldown(job)
+                        if await recover_identical_copy(self, message, key, job):
+                            continue
                         if self.reference_repair and await repair_reference(self, message, key, job):
                             continue
                         job['download_limited'] = job.get('download_limited', 0) + 1
