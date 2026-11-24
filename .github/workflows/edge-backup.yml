@@ -1,0 +1,55 @@
+name: Backup edge database
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 4 * * *'
+permissions:
+  contents: read
+concurrency:
+  group: edge-backup
+  cancel-in-progress: false
+jobs:
+  backup:
+    environment: cloudflare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      EDGE_DATABASE_ID: ${{ vars.EDGE_DATABASE_ID }}
+      EDGE_BACKUP_KEY: ${{ secrets.EDGE_BACKUP_KEY }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Require backup credentials
+        run: |
+          python3 - <<'PY'
+          import json,os,uuid
+          for name in ('CLOUDFLARE_API_TOKEN','CLOUDFLARE_ACCOUNT_ID','EDGE_DATABASE_ID','EDGE_BACKUP_KEY'):
+              if not os.environ.get(name):raise SystemExit('Missing configuration: '+name)
+          uuid.UUID(os.environ['EDGE_DATABASE_ID'])
+          config=json.load(open('edge/wrangler.jsonc'))
+          config['d1_databases'][0]['database_id']=os.environ['EDGE_DATABASE_ID']
+          open('edge/wrangler.jsonc','w').write(json.dumps(config)+'\n')
+          PY
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: edge
+      - name: Export and encrypt; never upload plaintext
+        working-directory: edge
+        run: |
+          umask 077
+          trap 'rm -f "$RUNNER_TEMP/edge-d1.sql" "$RUNNER_TEMP/edge-backup.key"' EXIT
+          python3 -c 'import os,pathlib; pathlib.Path(os.environ["RUNNER_TEMP"],"edge-backup.key").write_text(os.environ["EDGE_BACKUP_KEY"])'
+          npx wrangler d1 export sougabot-catalog --remote --output "$RUNNER_TEMP/edge-d1.sql"
+          mkdir -p backup-output
+          gpg --batch --yes --pinentry-mode loopback --passphrase-file "$RUNNER_TEMP/edge-backup.key" --symmetric --cipher-algo AES256 --output backup-output/edge-d1.sql.gpg "$RUNNER_TEMP/edge-d1.sql"
+          gpg --batch --pinentry-mode loopback --passphrase-file "$RUNNER_TEMP/edge-backup.key" --decrypt backup-output/edge-d1.sql.gpg 2>/dev/null | cmp - "$RUNNER_TEMP/edge-d1.sql"
+          cd backup-output
+          sha256sum edge-d1.sql.gpg > SHA256SUMS
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: edge-d1-encrypted
+          path: edge/backup-output/
+          retention-days: 90
