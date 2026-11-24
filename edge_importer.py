@@ -65,6 +65,10 @@ async def sync(client, database, bot_id):
 
 async def serve():
     validate()
+    client = EdgeClient()
+    status = await asyncio.to_thread(client.call, 'status')
+    if not status.get('active'):
+        raise RuntimeError('Seed the edge catalog and user preferences before starting the importer')
     # Guard the source session against accidentally starting another importer.
     from source_lock import source_lease
     root = Path(os.getenv('DATA_DIR', 'data'))
@@ -81,7 +85,6 @@ async def serve():
             app.bot_data['edge_error'] = True
             print('Edge update requires inspection: ' + type(context.error).__name__, flush=True)
         app.add_error_handler(record_error)
-        client = EdgeClient()
         stopped = asyncio.Event()
         loop = asyncio.get_running_loop()
         for signum in (signal.SIGINT, signal.SIGTERM):

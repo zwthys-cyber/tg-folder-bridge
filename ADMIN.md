@@ -1,4 +1,4 @@
-# 管理、连续发送和备份（0.9.0）
+# 管理、连续发送和备份（0.13.0）
 
 [Cloudflare 模式](CLOUDFLARE.md)的 `/admin` 显示日常服务与 importer 心跳；转存命令经私有 inbox 交给在线 Python 处理。下文描述原 Python 管理面板，不能据此推断 Cloudflare 已全部兼容旧按钮。
 

@@ -1,4 +1,4 @@
-# 接入已有 sougabot（0.11.0）
+# 接入已有 sougabot（0.13.0）
 
 继续沿用现有 sougabot 时使用本页。要摆脱 Codespaces 常驻限制，请使用 [Cloudflare 迁移流程](CLOUDFLARE.md)；新入口 `edge_importer.py` 不调用 getUpdates，不能与本页旧轮询同时启动。
 

@@ -62,6 +62,8 @@ npx wrangler secret put SYNC_TOKEN --config wrangler.production.jsonc
 - `SYNC_TOKEN`：独立随机生成；Python 端配置为 `EDGE_SYNC_TOKEN`，仅用于私有同步/inbox 接口。
 - D1 和队列创建需要账号权限；尚未授权时仅能完成代码和 CI，不能声称已上线。
 
+也可以先把下面两个 Cloudflare 凭据保存到 GitHub 仓库 Actions secrets，手动运行 `Provision edge resources`：它只创建或复用 `sougabot-catalog` / `sougabot-work`，返回不含密钥的 `edge-resource-ids` Artifact，避免在生产环境安装构建工具。把其中 database_id 保存为 `EDGE_DATABASE_ID`。
+
 可在 GitHub 环境 `cloudflare` 添加 Secrets `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID`，Variables `EDGE_DATABASE_ID`、`EDGE_OWNER_IDS`、`EDGE_RELAY_USER_ID`。手动运行 `Deploy edge service` 在 GitHub 完成测试、D1 迁移和部署；机器人私密变量仍用 Wrangler secrets 单独设置。**该工作流不会自动切 Telegram Webhook**。
 
 ## 3. 迁移目录与用户偏好
