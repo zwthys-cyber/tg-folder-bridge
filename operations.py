@@ -135,6 +135,8 @@ class Operations:
             return '没有这个任务。'
         if self.store.unknown_local_send(job_id):
             return '上传结果未知，请先检查聊天并使用 /resolve，不能直接重试。'
+        if row['state']=='cancelled':
+            return '此任务已停止补收，已保存文件保留。'
         duplicate=self.completed_duplicate(row)
         if duplicate:
             with self.store.db:
