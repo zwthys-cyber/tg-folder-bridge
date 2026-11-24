@@ -965,6 +965,20 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(workers, [self.bridge.download_workers, 1])
         wait.assert_awaited_once_with(job)
 
+    async def test_unavailable_repair_tail_does_not_start_bulk_download_or_upload(self):
+        from telethon.errors import FloodWaitError
+        self.bridge.transfer_mode='download_upload'
+        self.job.update(repair_partial=True,expected=1)
+        with patch('bridge.probe_original_tail',new_callable=AsyncMock,
+                   side_effect=FloodWaitError(None,capture=7)), \
+                patch.object(self.bridge,'staged_download') as bulk, \
+                patch('bridge.recover_identical_copy',new_callable=AsyncMock) as reuse:
+            with self.assertRaises(FloodWaitError):
+                await self.bridge.transfer_media(NS(),(101,3),self.job)
+        bulk.assert_not_called();reuse.assert_not_awaited()
+        self.assertEqual(self.bridge.store.files('job'),[])
+        self.assertEqual(self.job['phase'],'下载')
+
     async def test_download_refreshes_only_identical_source_media_and_retries_once(self):
         from contextlib import asynccontextmanager
         from telethon.errors import FloodWaitError

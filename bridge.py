@@ -30,6 +30,7 @@ from content_identity import analyze, preference
 from source_lock import source_lease
 from source_recovery import open_menu_content
 from source_catalog import MenuChangedError
+from source_probe import probe_original_tail
 from reference_repair import repair_reference
 from remote_identity import recover_identical_copy
 from operations import Operations
@@ -1121,6 +1122,19 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 self.store.record_transfer(job['id'], '复用', dict(bytes=message.file.size, transport='saved_file_id'))
                 return
             if job.get('repair_partial') and not (preview_only or replace_original or existing):
+                job['phase']='下载'
+                self.store.update(job['id'],'running',job['expected'],
+                    '先检查缺件尾部能否读取，避免反复下载整文件。')
+                probe_stats={}
+                probe_error=''
+                try:
+                    await self.await_cooldown(job)
+                    await probe_original_tail(self.client,message,probe_stats)
+                except BaseException as exc:
+                    probe_error=error_detail(exc,'来源尾部探测')
+                    raise
+                finally:
+                    self.store.record_transfer(job['id'],'来源探测',probe_stats,probe_error)
                 if await recover_identical_copy(self,message,key,job):
                     return
                 await self.await_cooldown(job)
@@ -1508,7 +1522,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
             return self.spool.stage(self.client, message, progress=progress,
                 workers=min(8, self.download_workers), stats=stats, checkpoint_scope=job['id'])
         pipeline = DownloadPipeline(plan, allowed, stage_ahead)
-        if self.spool and not job.get('dedup_audit'):
+        if self.spool and not job.get('dedup_audit') and not job.get('repair_partial'):
             job['download_pipeline'] = pipeline
         try:
             for index, message in enumerate(plan, 1):
