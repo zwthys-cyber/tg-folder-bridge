@@ -1,0 +1,35 @@
+name: Edge service
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  edge:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Install pinned Wrangler
+        working-directory: edge
+        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Syntax and real SQLite integration tests
+        working-directory: edge
+        run: |
+          npm run check
+          npm test
+      - name: Bundle Worker
+        working-directory: edge
+        run: npm run build
+      - name: Apply migrations with local D1 emulator
+        working-directory: edge
+        run: npx wrangler d1 migrations apply sougabot-catalog --local
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: edge-dependency-lock
+          path: edge/package-lock.json
+          retention-days: 7

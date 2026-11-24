@@ -1,0 +1,5 @@
+{
+  "name": "tg-folder-bridge-edge", "private": true, "type": "module",
+  "scripts": {"test": "node --test test/*.test.js", "check": "node --check src/worker.js", "build": "wrangler deploy --dry-run"},
+  "devDependencies": {"wrangler": "4.167.0"}
+}

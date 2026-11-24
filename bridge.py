@@ -167,15 +167,17 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
         print('文件转存模式：' + self.transfer_mode, flush=True)
         print(f'Bridge {VERSION}；下载并发上限：{self.download_workers}；上传并发上限：{self.upload_workers}；'
               f'上传连接：{self.upload_connections}；调度：{self.upload_scheduler}', flush=True)
-        await self.update_menu(app.bot)
+        if os.getenv('EDGE_MODE') != '1':
+            await self.update_menu(app.bot)
         self.client.add_event_handler(self.source_message, events.NewMessage(incoming=True))
         self.client.add_event_handler(self.source_message, events.MessageEdited(incoming=True))
         self.worker = asyncio.create_task(self.work())
         self.resume_after_upgrade()
         self.recovery_worker = asyncio.create_task(self.restore_jobs())
         self.retry_worker = asyncio.create_task(self.retry_loop())
-        self.delivery_worker = asyncio.create_task(self.delivery_loop())
-        self.notice_worker = asyncio.create_task(self.notice_loop())
+        if os.getenv('EDGE_MODE') != '1':
+            self.delivery_worker = asyncio.create_task(self.delivery_loop())
+            self.notice_worker = asyncio.create_task(self.notice_loop())
 
     async def restore_jobs(self):
         if not self.auto_resume or self.transfer_mode != 'download_upload':

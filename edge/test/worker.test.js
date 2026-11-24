@@ -1,0 +1,124 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {DatabaseSync} from 'node:sqlite';
+import {readFileSync} from 'node:fs';
+import worker from '../src/worker.js';
+import {order,albums,mediaCall,classify,validateFolder} from '../src/model.js';
+class DB {
+  constructor(){this.sql=new DatabaseSync(':memory:');this.sql.exec(readFileSync(new URL('../migrations/0001_edge.sql',import.meta.url),'utf8'));}
+  prepare(query){const sql=this.sql;let params=[];const statement={bind(...values){params=values;return statement;},async first(){return sql.prepare(query).get(...params)||null;},async all(){return {results:sql.prepare(query).all(...params)};},async run(){const result=sql.prepare(query).run(...params);return {meta:{changes:Number(result.changes)}};}};return statement;}
+  async batch(statements){this.sql.exec('BEGIN');try{const out=[];for(const s of statements)out.push(await s.run());this.sql.exec('COMMIT');return out;}catch(e){this.sql.exec('ROLLBACK');throw e;}}
+}
+function fixture(t){
+  const db=new DB(),queue=[],calls=[];let fault=null;
+  const old=globalThis.fetch;
+  globalThis.fetch=async(url,init)=>{
+    const method=url.split('/').at(-1),body=JSON.parse(init.body);calls.push({method,body});
+    if(fault && fault.method===method){const f=fault;fault=null;if(f.type==='network')throw Error('timeout');return Response.json({ok:false,error_code:429,parameters:{retry_after:1}});}
+    if(method==='getMe')return Response.json({ok:true,result:{id:99}});
+    return Response.json({ok:true,result:method==='sendMediaGroup'?body.media.map((_,i)=>({message_id:calls.length+i})): {message_id:calls.length}});
+  };
+  t.after(()=>{globalThis.fetch=old;db.sql.close();});
+  const env={DB:db,WORK:{async send(body){queue.push(body);}},BOT_TOKEN:'private',WEBHOOK_SECRET:'secret',SYNC_TOKEN:'sync',OWNER_IDS:'1',RELAY_USER_ID:'2'};
+  const api=async(path,body)=>worker.fetch(new Request('https://test/api/'+path,{method:'POST',headers:{authorization:'Bearer sync','content-type':'application/json'},body:JSON.stringify(body||{})}),env);
+  const webhook=async(raw,secret='secret')=>worker.fetch(new Request('https://test/webhook',{method:'POST',headers:{'x-telegram-bot-api-secret-token':secret},body:JSON.stringify(raw)}),env);
+  const drain=async()=>{let limit=30;while(queue.length && limit--){db.sql.exec("UPDATE events SET next_at=0");const body=queue.shift();await worker.queue({messages:[{body,ack(){},retry(){throw Error('unexpected infrastructure retry');}}]},env);}assert.ok(limit>0,'queue must settle');};
+  return {db,env,api,webhook,drain,calls,fault(f){fault=f;}};
+}
+const item=(kind='document',id='file')=>({kind,file_id:id,source_kind:kind,file_size:1024,caption:'',name:'IMG_0001.MOV'});
+const folder=(id='0123456789abcdef',title='测试1051')=>({id,title,items:[item()],cover:null});
+async function publish(f,folders=[folder()],id='a'.repeat(32)){
+  assert.equal((await f.api('sync/begin',{id,bot_id:99,count:folders.length})).status,200);
+  for(const [ordinal,x] of folders.entries())assert.equal((await f.api('sync/folder',{generation:id,ordinal,folder:x})).status,200);
+  const result=await f.api('sync/publish',{generation:id});assert.equal(result.status,200);return result.json();
+}
+const update=(id,text)=>({update_id:id,message:{message_id:id,chat:{id:3,type:'private'},from:{id:3},text}});
+const callback=(id,data,message=10)=>({update_id:id,callback_query:{id:String(id),from:{id:3},data,message:{message_id:message,chat:{id:3,type:'private'}}}});
+
+test('stable original-first order, family-safe albums, unmodified file IDs',()=>{
+  const input=[item('video','v1'),item('document','d'),item('photo','p'),item('video','v2')];
+  assert.deepEqual(order(input).map(x=>x.file_id),['d','p','v1','v2']);
+  assert.deepEqual(input.map(x=>x.file_id),['v1','d','p','v2']);
+  assert.deepEqual(albums(input).map(x=>x.length),[1,1,2]);
+  assert.equal(albums(Array.from({length:23},()=>item('video'))).length,3);
+  assert.equal(albums([item('animation'),item('animation')]).length,2);
+  assert.equal(mediaCall(3,[item('document')])[0],'sendDocument');
+  assert.equal(mediaCall(3,[item('video'),item('video')])[0],'sendMediaGroup');
+  assert.throws(()=>validateFolder({...folder(),items:[item('sticker')]}));
+});
+test('only private owners and relay receipts enter transfer inbox',()=>{
+  const x=update(1,'/resume abc');assert.equal(classify(x,[1],2),'user');
+  x.message.from.id=1;x.message.chat.id=1;assert.equal(classify(x,[1],2),'importer');
+  x.message.chat.type='group';assert.equal(classify(x,[1],2),'ignore');
+  const r=update(2,'');r.message.from.id=2;r.message.chat.id=2;r.message.video={};assert.equal(classify(r,[1],2),'importer');
+});
+test('webhook secret and sync API reject unauthenticated requests without writes',async t=>{
+  const f=fixture(t);assert.equal((await f.webhook(update(1,'/start'),'wrong')).status,401);
+  assert.equal((await worker.fetch(new Request('https://test/api/status'),f.env)).status,401);
+  assert.equal(f.db.sql.prepare('SELECT count(*) n FROM events').get().n,0);
+});
+test('bot identity guard and atomic generation publication',async t=>{
+  const f=fixture(t);assert.equal((await f.api('sync/begin',{id:'a'.repeat(32),bot_id:100,count:1})).status,409);
+  await f.api('sync/begin',{id:'b'.repeat(32),bot_id:99,count:1});
+  assert.equal((await f.api('sync/publish',{generation:'b'.repeat(32)})).status,409);
+  assert.equal(f.db.sql.prepare("SELECT value FROM config WHERE key='active'").get(),undefined);
+  const result=await publish(f);assert.equal(result.stats.messages,2);
+});
+test('initial snapshot never broadcasts history; later publication preserves edge preferences',async t=>{
+  const f=fixture(t);await f.api('sync/begin',{id:'a'.repeat(32),bot_id:99,count:1});
+  await f.api('sync/preferences',{generation:'a'.repeat(32),favorites:[{owner:3,job:folder().id}],subscribers:[{owner:3,enabled:1}]});
+  await publish(f);assert.equal(f.db.sql.prepare("SELECT count(*) n FROM events WHERE type='notice'").get().n,0);
+  await publish(f,[folder(),folder('fedcba9876543210','测试1052')],'b'.repeat(32));
+  assert.equal(f.db.sql.prepare("SELECT count(*) n FROM events WHERE type='notice'").get().n,1);
+  assert.equal(f.db.sql.prepare('SELECT count(*) n FROM favorites').get().n,1);
+  await f.api('sync/begin',{id:'c'.repeat(32),bot_id:99,count:1});
+  assert.equal((await f.api('sync/preferences',{generation:'c'.repeat(32),subscribers:[]})).status,409);
+});
+test('start orders directory numerically and duplicate updates do not repeat sends',async t=>{
+  const f=fixture(t);await publish(f,[folder('fedcba9876543210','测试1040'),folder()]);
+  await f.webhook(update(1,'/start'));await f.webhook(update(1,'/start'));await f.drain();
+  const messages=f.calls.filter(x=>x.method==='sendMessage');assert.equal(messages.length,2);
+  assert.ok(messages[0].body.text.includes('资源统计'));
+  assert.ok(messages[1].body.text.indexOf('1051')<messages[1].body.text.indexOf('1040'));
+  assert.equal(messages[1].body.reply_markup.inline_keyboard[0][0].text,'1');
+  assert.ok(!JSON.stringify(messages[1].body.reply_markup).includes('我的收藏'));
+});
+test('folder photo and details share one message, old panels deleted after card succeeds',async t=>{
+  const f=fixture(t);await publish(f,[{...folder(),cover:'cover-photo'}]);
+  f.db.sql.prepare('INSERT INTO panels VALUES(3,10,9)').run();
+  await f.webhook(callback(1,'open:'+folder().id));await f.drain();
+  const photo=f.calls.findIndex(x=>x.method==='sendPhoto'),deleted=f.calls.findIndex(x=>x.method==='deleteMessage');
+  assert.ok(photo>=0 && deleted>photo);assert.ok(f.calls[photo].body.caption.includes('内容统计'));
+  assert.equal(f.db.sql.prepare('SELECT count(*) n FROM panels').get().n,0);
+});
+test('whole-folder delivery confirms all media before completion and ignores repeated view',async t=>{
+  const f=fixture(t);const x={...folder(),items:[item('video','v1'),item('document','d'),item('video','v2')]};await publish(f,[x]);
+  f.db.sql.prepare('INSERT INTO cards VALUES(3,10,?)').run(x.id);
+  await f.webhook(callback(1,'view:'+x.id));await f.drain();
+  const actual=f.calls.filter(x=>['sendDocument','sendMediaGroup'].includes(x.method));assert.deepEqual(actual.map(x=>x.method),['sendDocument','sendMediaGroup']);
+  assert.ok(f.calls.some(x=>x.body.text?.includes('共发送 4 条消息')));
+  const count=f.calls.length;await f.webhook(callback(2,'view:'+x.id));await f.drain();assert.equal(f.calls.filter(x=>['sendDocument','sendMediaGroup'].includes(x.method)).length,2);assert.ok(f.calls.length>count);
+});
+test('explicit 429 retries only rejected operation, never repeats successful stats',async t=>{
+  const f=fixture(t);await publish(f);let n=0;const original=globalThis.fetch;
+  globalThis.fetch=async(url,init)=>{if(url.endsWith('/sendMessage') && ++n===2)return Response.json({ok:false,error_code:429,parameters:{retry_after:1}});return original(url,init);};
+  await f.webhook(update(1,'/start'));await f.drain();
+  assert.equal(f.calls.filter(x=>x.body.text?.includes('资源统计')).length,1);
+  assert.equal(f.db.sql.prepare("SELECT state FROM events WHERE id='update:1'").get().state,'complete');
+});
+test('ambiguous media send is not blindly replayed; user can explicitly confirm receipt',async t=>{
+  const f=fixture(t);await publish(f);f.db.sql.prepare('INSERT INTO cards VALUES(3,10,?)').run(folder().id);
+  f.fault({method:'sendDocument',type:'network'});
+  await f.webhook(callback(1,'view:'+folder().id));await f.drain();
+  const id='view:3:10';assert.equal(f.db.sql.prepare('SELECT state FROM events WHERE id=?').get(id).state,'uncertain');
+  await worker.scheduled({},f.env);await f.drain();assert.equal(f.calls.filter(x=>x.method==='sendDocument').length,1);
+  await f.webhook(callback(2,'recover:received:'+id));await f.drain();
+  assert.equal(f.db.sql.prepare('SELECT state FROM events WHERE id=?').get(id).state,'complete');
+  assert.equal(f.calls.filter(x=>x.method==='sendDocument').length,1);
+});
+test('importer inbox leases updates, acknowledgement removes only selected records',async t=>{
+  const f=fixture(t);const x=update(10,'/resume abc');x.message.from.id=1;x.message.chat.id=1;await f.webhook(x);
+  const a=await (await f.api('inbox/claim')).json();assert.equal(a.updates.length,1);
+  assert.equal((await (await f.api('inbox/claim')).json()).updates.length,0);
+  await f.api('inbox/ack',{ids:[10]});assert.equal(f.db.sql.prepare('SELECT count(*) n FROM importer_inbox').get().n,0);
+});

@@ -8,3 +8,8 @@ __pycache__/
 .admin-id
 resources.db*
 native-dist/
+edge/node_modules/
+edge/.wrangler/
+edge/.dev.vars
+edge/wrangler.production.jsonc
+edge-catalog*.json
