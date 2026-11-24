@@ -25,7 +25,7 @@
 
 ### 当前边界
 
-这是可部署的新增运行模式，并非已经完成线上切换。旧资源链接库 `resources.db` 的 `/add`、`/delete` 和外部频道搜索仍属于原 sougabot；Worker 当前搜索**文件夹名称**。旧聊天中已经发出的原件取回、分组、管理员面板按钮不全部兼容，迁移后以新的 `/start` 与命令为入口。公开目录沿用原 Store.catalog 的可见范围；未公开的管理员私有任务不进入 D1。
+维护者现有部署已经完成切换，验收结果见 [DEPLOYMENT_STATUS.md](DEPLOYMENT_STATUS.md)。下面说明此模式的兼容边界；其他部署仍需自行完成迁移。旧资源链接库 `resources.db` 的 `/add`、`/delete` 和外部频道搜索仍属于原 sougabot；Worker 当前搜索**文件夹名称**。旧聊天中已经发出的原件取回、分组、管理员面板按钮不全部兼容，迁移后以新的 `/start` 与命令为入口。公开目录沿用原 Store.catalog 的可见范围；未公开的管理员私有任务不进入 D1。
 
 转存模式必须改为 `UPLOAD_BACKEND=relay`、云端 `BOT_API_BASE`。当前混合上传依赖本地 Bot API，不能与云 Webhook 混用；<=2000 MB 的本地上传优化暂不适用于这个新入口。大文件由专用用户账号上传到原机器人，再经 Webhook 回执确认，原文件无需重新上传。
 
