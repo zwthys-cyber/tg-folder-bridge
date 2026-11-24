@@ -60,7 +60,7 @@ async def dispatch(client, target, ledger, index, owner, allowed, root):
     # Unknown command delivery must be reconciled, never blindly repeated.
     if ledger.db.execute("SELECT 1 FROM items WHERE state='dispatching' LIMIT 1").fetchone():
         return False
-    for item in ledger.db.execute("SELECT * FROM items WHERE state NOT IN ('complete','review','submitted') ORDER BY priority DESC,rowid").fetchall():
+    for item in ledger.db.execute("SELECT * FROM items WHERE state NOT IN ('complete','review','submitted','ignored') ORDER BY priority DESC,rowid").fetchall():
         job = jobs.get(item['link'])
         if job and job['state'] == 'complete':
             ledger.set_state(item, 'complete', job['id'])

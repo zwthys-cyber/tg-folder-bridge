@@ -90,6 +90,9 @@ class Ledger:
             if not job:
                 # dispatching/submitted with no bridge record stays uncertain. Never resend blindly.
                 continue
+            if job['state']=='cancelled':
+                self.set_state(row,'ignored',job['id'])
+                continue
             state = 'complete' if job['state'] == 'complete' else (
                 'submitted' if job['state'] in ACTIVE else (
                     'ready' if row['attempts'] == 0 else 'review'))

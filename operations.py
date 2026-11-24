@@ -62,6 +62,8 @@ class Operations:
                  f'磁盘可用：{disk.free/1024**3:.1f} / {disk.total/1024**3:.1f} GiB',
                  f'并发上限：下载 {self.download_workers}，上传 {self.upload_workers}']
         active = self.active
+        if states.get('cancelled',0):
+            lines.append(f"已停止补收：{states['cancelled']} 个任务（已保存文件保留）")
         if active:
             row = self.store.get(active['id'])
             if row and row['owner'] == uid:
@@ -86,7 +88,10 @@ class Operations:
                 counts = dict(db.execute('SELECT state,count(*) FROM items GROUP BY state'))
             for page,total,finished in scans:
                 lines.append(f'目录采集：已完成 {total if finished else max(0,page-1)}/{total} 页')
-            lines.append(f"链接：已完成 {counts.get('complete',0)}，待提交 {counts.get('ready',0)}，需检查 {counts.get('review',0)+counts.get('dispatching',0)}")
+            summary=f"链接：已完成 {counts.get('complete',0)}，待提交 {counts.get('ready',0)}，需检查 {counts.get('review',0)+counts.get('dispatching',0)}"
+            if counts.get('ignored',0):
+                summary+=f"，已停止补收 {counts['ignored']}"
+            lines.append(summary)
         latest = Path(os.getenv('BACKUP_DIR', '/root/sougabot-backups/scheduled'))
         try:
             backups = sorted(latest.glob('metadata-*/manifest.json')) if latest.exists() else []

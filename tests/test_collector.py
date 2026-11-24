@@ -71,6 +71,30 @@ class StateTests(unittest.TestCase):
 
 
 class MenuTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancelled_partial_keeps_saved_file_and_never_dispatches_after_restart(self):
+        from collect_links import dispatch
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);index=root/'index.sqlite3';link='https://t.me/epan?start=Stopped'
+            store=Store(index);store.create('stopped',7,link)
+            store.add_file('stopped',(101,1),NS(chat_id=7,message_id=10),'saved-file','document')
+            store.update('stopped','cancelled',2,'管理员已停止补收缺件。')
+            store.db.close();store=Store(index)
+            self.assertEqual(store.recoverable_jobs,[])
+            self.assertEqual(len(store.files('stopped')),1)
+            ledger=Ledger(root/'collector.sqlite3');ledger.add('source','folder','folder',link)
+            client=NS(send_message=AsyncMock())
+            self.assertFalse(await dispatch(client,'bot',ledger,index,7,{'epan'},root))
+            client.send_message.assert_not_awaited()
+            self.assertEqual(ledger.summary(),{'ignored':1})
+            ledger.db.close();ledger=Ledger(root/'collector.sqlite3')
+            _,jobs=existing_jobs(index,7,{'epan'});ledger.reconcile(jobs)
+            self.assertIsNone(ledger.next())
+            self.assertEqual(ledger.summary(),{'ignored':1})
+            store.update('stopped','queued',2)
+            _,jobs=existing_jobs(index,7,{'epan'});ledger.reconcile(jobs)
+            self.assertEqual(ledger.summary(),{'submitted':1})
+            ledger.db.close();store.db.close()
+
     def test_details_parse_and_refuse_unrelated_link(self):
         message = NS(raw_text='📁 文件夹1051\n分享链接：\nhttps://t.me/epan?start=s_AbC', entities=[], buttons=[])
         self.assertEqual(share_link(message, {'epan'}), ('文件夹1051', 'https://t.me/epan?start=s_AbC'))
