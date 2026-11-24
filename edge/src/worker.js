@@ -49,19 +49,22 @@ async function enqueue(e,id,type,owner,payload) {
 async function active(e){return (await first(e,"SELECT value FROM config WHERE key='active'"))?.value;}
 async function folder(e,id,generation){const row=await first(e,'SELECT payload FROM folders WHERE generation=? AND id=?',generation||await active(e),id);return row?JSON.parse(row.payload):null;}
 async function favorite(e,uid,id){return !!await first(e,'SELECT 1 FROM favorites WHERE owner=? AND job=?',uid,id);}
-function controls(f,saved){return keyboard([[button('📁 文件夹详情',`open:${f.id}`),button(saved?'⭐ 已收藏':'☆ 收藏',`fav:${f.id}`)],[button('⭐ 我的收藏','favorites:1'),button('📁 文件夹列表','list:1')]]);}
+function controls(f,saved){return keyboard([[button('📁 文件夹详情',`open:${f.id}`),button(saved?'⭐ 已收藏':'☆ 收藏',`${saved?'unfav':'fav'}:${f.id}`)],[button('⭐ 我的收藏','favorites:1'),button('📁 文件夹列表','list:1')]]);}
 async function list(e,uid,page,favorites,call,stats=false,search='') {
   const generation=await active(e);
   if(!generation){await call('sendMessage',{chat_id:uid,text:'资源目录尚未接入，请稍后查看。'});return;}
   const condition=favorites?' AND id IN (SELECT job FROM favorites WHERE owner=?)':search?' AND instr(lower(title),lower(?))>0':'';
   const args=favorites?[uid]:search?[search]:[];
   const total=(await first(e,'SELECT count(*) AS n FROM folders WHERE generation=?'+condition,generation,...args)).n;
-  const pages=Math.max(1,Math.ceil(total/10));page=Math.max(1,Math.min(Number(page)||1,pages));
+  const pages=Math.max(1,Math.ceil(total/10));page=Number(page)||1;
+  if(!Number.isSafeInteger(page)||page<1||page>pages){await call('sendMessage',{chat_id:uid,text:`页码超出范围，请输入 1–${pages}。`});return;}
   let statsMessage=null;
   if(stats){const summary=JSON.parse((await first(e,"SELECT value FROM config WHERE key='stats'"))?.value||'{}');statsMessage=await call('sendMessage',{chat_id:uid,text:`📊 资源统计\n　• 文件夹：${summary.folders||0} 个\n　• 消息：${summary.messages||0} 条\n　• 图片：${summary.photos||0} 张\n　• 视频：${summary.videos||0} 个`});}
   const selected=await rows(e,'SELECT id,title,json_array_length(payload,\'$.items\') AS n FROM folders WHERE generation=?'+condition+' ORDER BY rank DESC,ordinal LIMIT 10 OFFSET ?',generation,...args,(page-1)*10);
   const buttons=chunks(selected.map((x,i)=>button(String(i+1),`open:${x.id}`)),5);
-  const prefix=favorites?'favorites':'list'; const nav=[];
+  let prefix=favorites?'favorites':'list';
+  if(search){const digest=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(search)));const token=Array.from(digest.slice(0,6),x=>x.toString(16).padStart(2,'0')).join('');await run(e,'INSERT OR REPLACE INTO config VALUES(?,?)',`search:${uid}:${token}`,search);prefix=`search:${token}`;}
+  const nav=[];
   if(page>1)nav.push(button('⬅️ 上一页',`${prefix}:${page-1}`));
   if(pages>1)nav.push(button(`📍 ${page}/${pages} 跳转`,`jump:${prefix}`));
   if(page<pages)nav.push(button('下一页 ➡️',`${prefix}:${page+1}`));
@@ -81,7 +84,8 @@ async function removePanel(e,uid,message,call){
 }
 async function open(e,uid,id,origin,call) {
   const f=await folder(e,id);if(!f){await call('sendMessage',{chat_id:uid,text:'文件夹尚未就绪或已移除。'});return;}
-  const keys=keyboard([[button('查看内容',`view:${id}`)],[button(await favorite(e,uid,id)?'⭐ 已收藏':'☆ 收藏',`fav:${id}`),button('⭐ 我的收藏','favorites:1')],[button('文件夹列表','list:1')]]);
+  const saved=await favorite(e,uid,id);
+  const keys=keyboard([[button('查看内容',`view:${id}`)],[button(saved?'⭐ 已收藏':'☆ 收藏',`${saved?'unfav':'fav'}:${id}`),button('⭐ 我的收藏','favorites:1')],[button('文件夹列表','list:1')]]);
   const body={chat_id:uid,reply_markup:keys};
   const card=await call(f.cover?'sendPhoto':'sendMessage',f.cover?{...body,photo:f.cover,caption:details(f)}:{...body,text:details(f)});
   await run(e,'INSERT OR REPLACE INTO cards VALUES(?,?,?)',uid,card.message_id,id);
@@ -95,6 +99,8 @@ async function userUpdate(e,event) {
   // Previously emitted bridge buttons remain usable after migration.
   action=action.replace(/^bridge_catalog:/,'list:').replace(/^bridge_favorites:/,'favorites:').replace(/^bridge_open:/,'open:').replace(/^bridge_view:/,'view:').replace(/^bridge_fav:/,'fav:').replace(/^bridge_unfav:/,'unfav:').replace(/^bridge_notice:/,'notice:');
   if(!action && /^\/start(?:@\w+)?(?:\s|$)/.test(text))return list(e,uid,1,false,call,true);
+  if(!action && /^\/page\s+\d+$/.test(text))return list(e,uid,Number(text.split(/\s+/)[1]),false,call);
+  if(!action && text==='/cancel'){await run(e,'DELETE FROM config WHERE key=?',`jump:${uid}`);return call('sendMessage',{chat_id:uid,text:'已取消页码输入。'});}
   if(!action && /^\/favorites(?:@\w+)?$/.test(text))return list(e,uid,1,true,call);
   if(!action && /^\/folder\s+([a-f0-9]{16})/.test(text))return open(e,uid,text.split(/\s+/)[1],null,call);
   if(!action && /^\/(notifications|subscribe|unsubscribe)(?:@\w+)?$/.test(text))action='notice:'+(/^\/subscribe/.test(text)?'on':/^\/unsubscribe/.test(text)?'off':'settings');
@@ -105,21 +111,33 @@ async function userUpdate(e,event) {
   }
   if(!action && m?.reply_to_message && /^\d+$/.test(text)){
     const jump=await first(e,'SELECT value FROM config WHERE key=?',`jump:${uid}`);
-    if(jump){const target=JSON.parse(jump.value);if(target.message===m.reply_to_message.message_id && now()-target.at<600)return list(e,uid,Number(text),target.favorites,call);}
+    if(jump){const target=JSON.parse(jump.value);if(target.message===m.reply_to_message.message_id && now()-target.at<600)return list(e,uid,Number(text),target.favorites,call,false,target.search||'');}
   }
   const [kind,arg]=action.split(':');
   if(['list','favorites'].includes(kind)){await list(e,uid,arg,kind==='favorites',call);if(q)await removePanel(e,uid,q.message.message_id,call);return;}
+  if(kind==='search'){
+    const query=(await first(e,'SELECT value FROM config WHERE key=?',`search:${uid}:${arg}`))?.value;
+    if(query)await list(e,uid,action.split(':')[2],false,call,false,query);
+    else await call('sendMessage',{chat_id:uid,text:'搜索已过期，请重新输入关键词。'});
+    if(q)await removePanel(e,uid,q.message.message_id,call);return;
+  }
   if(kind==='jump'){
     const prompt=await call('sendMessage',{chat_id:uid,text:'请回复这条消息，输入要跳转的页码。',reply_markup:{force_reply:true,selective:true}});
-    await run(e,'INSERT OR REPLACE INTO config VALUES(?,?)',`jump:${uid}`,JSON.stringify({message:prompt.message_id,favorites:arg==='favorites',at:now()}));return;
+    await run(e,'INSERT OR REPLACE INTO config VALUES(?,?)',`jump:${uid}`,JSON.stringify({message:prompt.message_id,favorites:arg==='favorites',search:arg==='search'?(await first(e,'SELECT value FROM config WHERE key=?',`search:${uid}:${action.split(':')[2]}`))?.value||'':'',at:now()}));return;
   }
   if(kind==='open')return open(e,uid,arg,q.message.message_id,call);
   if(['fav','unfav'].includes(kind)){
     if(!await folder(e,arg))return;
-    // Toggle once per update, even when a send is retried after an explicit 429.
-    const toggle=await run(e,"INSERT OR IGNORE INTO config VALUES(?,?)",`toggle:${event.id}`,String(await favorite(e,uid,arg)));
-    if(toggle.meta.changes){if(await favorite(e,uid,arg))await run(e,'DELETE FROM favorites WHERE owner=? AND job=?',uid,arg);else await run(e,'INSERT OR IGNORE INTO favorites VALUES(?,?)',uid,arg);}
-    return call('sendMessage',{chat_id:uid,text:await favorite(e,uid,arg)?'⭐ 已收藏':'已取消收藏'});
+    // Explicit set/unset operations remain idempotent even for a second click
+    // delivered under another update ID from an old Telegram keyboard.
+    if(kind==='unfav')await run(e,'DELETE FROM favorites WHERE owner=? AND job=?',uid,arg);
+    else await run(e,'INSERT OR IGNORE INTO favorites VALUES(?,?)',uid,arg);
+    const saved=await favorite(e,uid,arg);
+    if(q.message.reply_markup){
+      const keys=q.message.reply_markup.inline_keyboard.map(row=>row.map(x=>/^(?:bridge_)?(?:fav|unfav):/.test(x.callback_data||'')?button(saved?'⭐ 已收藏':'☆ 收藏',`${saved?'unfav':'fav'}:${arg}`):x));
+      await call('editMessageReplyMarkup',{chat_id:uid,message_id:q.message.message_id,reply_markup:keyboard(keys)});
+    }
+    return call('sendMessage',{chat_id:uid,text:saved?'⭐ 已收藏':'已取消收藏'});
   }
   if(kind==='view'){
     const card=await first(e,'SELECT job FROM cards WHERE chat=? AND message=?',uid,q.message.message_id);

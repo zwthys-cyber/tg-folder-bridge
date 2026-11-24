@@ -42,6 +42,6 @@ export function classify(raw, owners, relay) {
   if(!m || m.chat?.type!=='private' || m.from?.id!==m.chat.id) return 'ignore';
   if(m.from.id===relay && ['document','photo','video','animation','audio','voice','video_note'].some(k=>m[k])) return 'importer';
   const text=m.text||'';
-  if(owners.includes(m.from.id) && (/^\/(fetch|folders|status|resume|speed|transport|diagnostics|resolve|dedup|failures|cancel)(?:@\w+)?(?:\s|$)/.test(text)|| /^https:\/\/t\.me\/\w+\?start=/.test(text))) return 'importer';
+  if(owners.includes(m.from.id) && (/^\/(fetch|folders|status|resume|speed|transport|diagnostics|resolve|dedup|failures)(?:@\w+)?(?:\s|$)/.test(text)|| /^https:\/\/t\.me\/\w+\?start=/.test(text))) return 'importer';
   return 'user';
 }

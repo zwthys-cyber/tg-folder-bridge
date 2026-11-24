@@ -64,7 +64,7 @@ npx wrangler secret put SYNC_TOKEN --config wrangler.production.jsonc
 
 也可以先把下面两个 Cloudflare 凭据保存到 GitHub 仓库 Actions secrets，手动运行 `Provision edge resources`：它只创建或复用 `sougabot-catalog` / `sougabot-work`，返回不含密钥的 `edge-resource-ids` Artifact，避免在生产环境安装构建工具。把其中 database_id 保存为 `EDGE_DATABASE_ID`。
 
-可在 GitHub 环境 `cloudflare` 添加 Secrets `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID`，Variables `EDGE_DATABASE_ID`、`EDGE_OWNER_IDS`、`EDGE_RELAY_USER_ID`。手动运行 `Deploy edge service` 在 GitHub 完成测试、D1 迁移和部署；机器人私密变量仍用 Wrangler secrets 单独设置。**该工作流不会自动切 Telegram Webhook**。
+可在 GitHub 环境 `cloudflare` 添加 Secrets `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID`，Variables `EDGE_DATABASE_ID`、`EDGE_OWNER_IDS`、`EDGE_RELAY_USER_ID`。手动运行 `Deploy edge service` 在 GitHub 完成测试、D1 迁移和部署；机器人私密变量可用 Wrangler secrets 单独设置，或保存为 GitHub Secrets `EDGE_BOT_TOKEN`、`EDGE_WEBHOOK_SECRET`、`EDGE_SYNC_TOKEN`，由该工作流通过标准输入写入 Worker secrets，不输出值。**该工作流不会自动切 Telegram Webhook**。
 
 ## 3. 迁移目录与用户偏好
 

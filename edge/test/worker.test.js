@@ -122,3 +122,32 @@ test('importer inbox leases updates, acknowledgement removes only selected recor
   assert.equal((await (await f.api('inbox/claim')).json()).updates.length,0);
   await f.api('inbox/ack',{ids:[10]});assert.equal(f.db.sql.prepare('SELECT count(*) n FROM importer_inbox').get().n,0);
 });
+
+test('search pagination and jump keep their own scope; invalid pages are explained',async t=>{
+  const f=fixture(t);const folders=Array.from({length:12},(_,i)=>folder(i.toString(16).padStart(16,'0'),`关键词${i+1000}`));
+  folders.push(folder('f'.repeat(16),'其他9999'));await publish(f,folders);
+  await f.webhook(update(1,'关键词'));await f.drain();
+  const result=f.calls.find(x=>x.method==='sendMessage');
+  const next=result.body.reply_markup.inline_keyboard.at(-1).at(-1).callback_data;
+  assert.ok(next.startsWith('search:'));await f.webhook(callback(2,next));await f.drain();
+  const last=f.calls.filter(x=>x.method==='sendMessage').at(-1);
+  assert.ok(last.body.text.includes('共 12 个文件夹'));assert.ok(last.body.text.includes('第 2/2 页'));assert.ok(!last.body.text.includes('其他'));
+  await f.webhook(update(3,'/page 9999'));await f.drain();
+  assert.ok(f.calls.at(-1).body.text.includes('页码超出范围'));
+});
+test('a newly public incomplete folder notifies only after completion',async t=>{
+  const f=fixture(t);await publish(f);f.db.sql.prepare('INSERT INTO subscribers VALUES(3,1)').run();
+  const extra={...folder('f'.repeat(16),'测试1052'),state:'partial'};
+  await publish(f,[folder(),extra],'b'.repeat(32));assert.equal(f.db.sql.prepare("SELECT count(*) n FROM events WHERE type='notice'").get().n,0);
+  await publish(f,[folder(),{...extra,state:'complete'}],'c'.repeat(32));
+  assert.equal(f.db.sql.prepare("SELECT count(*) n FROM events WHERE type='notice'").get().n,1);
+});
+
+test('repeated clicks on an old favorite button cannot accidentally unsubscribe',async t=>{
+  const f=fixture(t);await publish(f);
+  await f.webhook(callback(1,'fav:'+folder().id));await f.drain();
+  await f.webhook(callback(2,'fav:'+folder().id));await f.drain();
+  assert.equal(f.db.sql.prepare('SELECT count(*) n FROM favorites').get().n,1);
+  await f.webhook(callback(3,'unfav:'+folder().id));await f.drain();
+  assert.equal(f.db.sql.prepare('SELECT count(*) n FROM favorites').get().n,0);
+});
