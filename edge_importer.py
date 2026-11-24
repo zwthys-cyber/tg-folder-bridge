@@ -3,6 +3,7 @@ import asyncio
 import contextlib
 import os
 import signal
+import time
 from pathlib import Path
 from dotenv import load_dotenv
 from telegram import Update
@@ -21,6 +22,7 @@ def validate():
 async def inbox(client, app):
     while True:
         try:
+            started = time.monotonic()
             result = await asyncio.to_thread(client.call, 'inbox/claim')
             for raw in result['updates']:
                 # Markers are processed even while Bridge.work awaits a receipt.
@@ -38,12 +40,15 @@ async def inbox(client, app):
                 # Unknown processing is retained locally for inspection, never
                 # blindly repeated as a potentially accepted transfer command.
                 await asyncio.to_thread(client.call, 'inbox/ack', {'ids': [raw['update_id']]})
+            if not result['updates'] and time.monotonic()-started < 1:
+                # Compatibility with an old non-waiting endpoint, without a hot loop.
+                await asyncio.sleep(1-(time.monotonic()-started))
         except asyncio.CancelledError:
             raise
         except Exception as error:
             # Do not print URLs/response bodies containing private credentials.
             print('Edge inbox temporarily unavailable: ' + type(error).__name__, flush=True)
-        await asyncio.sleep(2)
+            await asyncio.sleep(2)
 
 
 async def sync(client, database, bot_id):

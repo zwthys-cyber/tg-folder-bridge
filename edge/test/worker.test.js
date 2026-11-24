@@ -5,7 +5,7 @@ import {readFileSync} from 'node:fs';
 import worker from '../src/worker.js';
 import {order,albums,mediaCall,classify,validateFolder} from '../src/model.js';
 class DB {
-  constructor(){this.sql=new DatabaseSync(':memory:');this.sql.exec(readFileSync(new URL('../migrations/0001_edge.sql',import.meta.url),'utf8'));this.sql.exec(readFileSync(new URL('../migrations/0002_cover_cache.sql',import.meta.url),'utf8'));}
+  constructor(){this.sql=new DatabaseSync(':memory:');this.sql.exec(readFileSync(new URL('../migrations/0001_edge.sql',import.meta.url),'utf8'));this.sql.exec(readFileSync(new URL('../migrations/0002_cover_cache.sql',import.meta.url),'utf8'));this.sql.exec(readFileSync(new URL('../migrations/0003_latency.sql',import.meta.url),'utf8'));}
   prepare(query){const sql=this.sql;let params=[];const statement={bind(...values){params=values;return statement;},async first(){return sql.prepare(query).get(...params)||null;},async all(){return {results:sql.prepare(query).all(...params)};},async run(){const result=sql.prepare(query).run(...params);return {meta:{changes:Number(result.changes)}};}};return statement;}
   async batch(statements){this.sql.exec('BEGIN');try{const out=[];for(const s of statements)out.push(await s.run());this.sql.exec('COMMIT');return out;}catch(e){this.sql.exec('ROLLBACK');throw e;}}
 }
@@ -124,8 +124,8 @@ test('ambiguous media send is not blindly replayed; user can explicitly confirm 
 });
 test('importer inbox leases updates, acknowledgement removes only selected records',async t=>{
   const f=fixture(t);const x=update(10,'/resume abc');x.message.from.id=1;x.message.chat.id=1;await f.webhook(x);
-  const a=await (await f.api('inbox/claim')).json();assert.equal(a.updates.length,1);
-  assert.equal((await (await f.api('inbox/claim')).json()).updates.length,0);
+  const a=await (await f.api('inbox/claim?wait=0')).json();assert.equal(a.updates.length,1);
+  assert.equal((await (await f.api('inbox/claim?wait=0')).json()).updates.length,0);
   await f.api('inbox/ack',{ids:[10]});assert.equal(f.db.sql.prepare('SELECT count(*) n FROM importer_inbox').get().n,0);
 });
 
@@ -171,4 +171,20 @@ test('uncached bounded JPEG cover streams once and then reuses its native photo 
   await f.webhook(callback(2,'open:'+x.id));await f.drain();
   assert.equal(f.calls.filter(x=>x.method==='getFile').length,1);
   assert.equal(f.calls.filter(x=>x.method==='sendPhoto').at(-1).body.photo,'cached-cover-photo');
+});
+
+test('button updates use independent UI queue while media stays on work queue',async t=>{
+ const f=fixture(t),ui=[];f.env.UI={async send(body){ui.push(body);}};await publish(f);
+ await f.webhook(update(1,'/start'));
+ assert.equal(ui.length,1);assert.equal(f.calls.filter(x=>x.method==='sendMessage').length,0);
+ await worker.queue({messages:ui.splice(0).map(body=>({body,ack(){},retry(){throw Error('retry');}}))},f.env);
+ assert.equal(f.calls.filter(x=>x.method==='sendMessage').length,2);
+ const status=await (await f.api('status')).json();assert.equal(status.latency[0].type,'update');assert.equal(status.latency[0].samples,1);
+});
+test('parallel UI consumers cannot start two active folders for one user',async t=>{
+ const f=fixture(t);const sql=f.db.sql;
+ sql.prepare("INSERT INTO events(id,type,owner,payload,state,touched) VALUES('one','delivery',3,'{}','pending',0)").run();
+ assert.throws(()=>sql.prepare("INSERT INTO events(id,type,owner,payload,state,touched) VALUES('two','delivery',3,'{}','pending',0)").run(),/UNIQUE/);
+ sql.prepare("UPDATE events SET state='complete' WHERE id='one'").run();
+ sql.prepare("INSERT INTO events(id,type,owner,payload,state,touched) VALUES('two','delivery',3,'{}','pending',0)").run();
 });

@@ -43,10 +43,13 @@ async function send(e,id,method,body,upload) {
     throw error;
   }
 }
-async function signal(e,id){await e.WORK.send({id});}
+async function signal(e,id,type,options){
+  if(!type)type=(await first(e,'SELECT type FROM events WHERE id=?',id))?.type;
+  await (type==='update' && e.UI?e.UI:e.WORK).send({id},options);
+}
 async function enqueue(e,id,type,owner,payload) {
-  await run(e,"INSERT OR IGNORE INTO events(id,type,owner,payload,touched) VALUES(?,?,?,?,?)",id,type,owner,JSON.stringify(payload),now());
-  await signal(e,id);
+  await run(e,"INSERT OR IGNORE INTO events(id,type,owner,payload,touched,created_ms) VALUES(?,?,?,?,?,?)",id,type,owner,JSON.stringify(payload),now(),Date.now());
+  await signal(e,id,type);
 }
 async function active(e){return (await first(e,"SELECT value FROM config WHERE key='active'"))?.value;}
 async function folder(e,id,generation){const row=await first(e,'SELECT payload FROM folders WHERE generation=? AND id=?',generation||await active(e),id);return row?JSON.parse(row.payload):null;}
@@ -206,16 +209,16 @@ async function delivery(e,event){
   return true;
 }
 async function process(e,id){
-  const claim=await run(e,"UPDATE events SET state='processing',touched=? WHERE id=? AND state='pending' AND next_at<=?",now(),id,now());
+  const claim=await run(e,"UPDATE events SET state='processing',touched=?,started_ms=CASE WHEN started_ms=0 THEN ? ELSE started_ms END WHERE id=? AND state='pending' AND next_at<=?",now(),Date.now(),id,now());
   if(!claim.meta.changes)return;
   const event=await first(e,'SELECT * FROM events WHERE id=?',id);
   try{
     const done=event.type==='delivery'?await delivery(e,event):event.type==='notice'?await notice(e,event):await userUpdate(e,event);
-    if(done!==false)await run(e,"UPDATE events SET state='complete',touched=? WHERE id=?",now(),id);
+    if(done!==false)await run(e,"UPDATE events SET state='complete',touched=?,finished_ms=? WHERE id=?",now(),Date.now(),id);
   }catch(error){
     const retry=error instanceof Retry;
     await run(e,'UPDATE events SET state=?,next_at=?,error=?,touched=? WHERE id=?',retry?'pending':error instanceof Uncertain?'uncertain':'failed',retry?now()+error.seconds:0,String(error.message).slice(0,200),now(),id);
-    if(retry)await e.WORK.send({id},{delaySeconds:Math.min(error.seconds,43200)});
+    if(retry)await signal(e,id,event.type,{delaySeconds:Math.min(error.seconds,43200)});
     else if(error instanceof Uncertain && event.type==='delivery'){
       try{await send(e,`recovery:${id}`,'sendMessage',{chat_id:event.owner,text:'上一批发送结果未确认，请检查聊天记录后选择。',reply_markup:keyboard([[button('确认上一批已收到',`recover:received:${id}`)],[button('确认未收到，重发上一批',`recover:retry:${id}`)]])});}catch{/* state remains visible in authenticated status */}
     }
@@ -224,10 +227,16 @@ async function process(e,id){
 async function notice(e,event){const f=JSON.parse(event.payload);if(!(await first(e,'SELECT enabled FROM subscribers WHERE owner=?',event.owner))?.enabled)return;await send(e,event.id,'sendMessage',{chat_id:event.owner,text:`📁 新文件夹已上架\n\n${f.title}\n共 ${f.count} 个文件`,reply_markup:keyboard([[button('查看文件夹',`open:${f.id}`)],[button('取消更新通知','notice:off')]])});}
 async function api(request,e,path){
   if(!await same(request.headers.get('authorization'),`Bearer ${e.SYNC_TOKEN}`) || !e.SYNC_TOKEN)return json({error:'Unauthorized'},401);
-  if(path==='/api/status')return json({active:await active(e),events:await rows(e,'SELECT state,count(*) count FROM events GROUP BY state')});
+  if(path==='/api/status')return json({active:await active(e),events:await rows(e,'SELECT state,count(*) count FROM events GROUP BY state'),latency:await rows(e,"SELECT type,count(*) samples,round(avg(started_ms-created_ms)) queue_ms,round(avg(finished_ms-started_ms)) processing_ms FROM (SELECT * FROM events WHERE created_ms>0 AND finished_ms>0 ORDER BY created_ms DESC LIMIT 30) GROUP BY type")});
   if(path==='/api/inbox/claim'){
     await run(e,"INSERT OR REPLACE INTO config VALUES('importer_heartbeat',?)",String(now()));
-    const entries=await rows(e,'UPDATE importer_inbox SET lease=? WHERE id IN (SELECT id FROM importer_inbox WHERE lease<? AND expires>? ORDER BY id LIMIT 20) RETURNING id,payload',now()+120,now(),now());
+    const wait=Math.min(15000,Math.max(0,Number(new URL(request.url).searchParams.get('wait')??15000)||0));
+    const deadline=Date.now()+wait;let entries;
+    do{
+      entries=await rows(e,'UPDATE importer_inbox SET lease=? WHERE id IN (SELECT id FROM importer_inbox WHERE lease<? AND expires>? ORDER BY id LIMIT 20) RETURNING id,payload',now()+120,now(),now());
+      if(entries.length || Date.now()>=deadline)break;
+      await new Promise(resolve=>setTimeout(resolve,Math.min(1000,deadline-Date.now())));
+    }while(true);
     return json({updates:entries.map(x=>JSON.parse(x.payload))});
   }
   if(Number(request.headers.get('content-length')||0)>1000000)return json({error:'Too large'},413);
@@ -290,8 +299,8 @@ export default {
   async scheduled(_event,e){
     // No implicit replay after an interrupted external send.
     await run(e,"UPDATE events SET state='uncertain',error='Interrupted handler' WHERE state='processing' AND touched<?",now()-600);
-    const pending=await rows(e,"SELECT id FROM events WHERE state='pending' AND next_at<=? ORDER BY touched LIMIT 20",now());
-    for(const x of pending)await signal(e,x.id);
+    const pending=await rows(e,"SELECT id,type FROM events WHERE state='pending' AND next_at<=? ORDER BY touched LIMIT 20",now());
+    for(const x of pending)await signal(e,x.id,x.type);
     const obsolete=await rows(e,"SELECT id FROM generations WHERE state='published' AND id<>(SELECT value FROM config WHERE key='active') LIMIT 1");
     if(obsolete.length){await run(e,'DELETE FROM folders WHERE generation=?',obsolete[0].id);await run(e,'DELETE FROM generations WHERE id=?',obsolete[0].id);}
     // Bounded retention preserves uncertain sends; never discard unresolved inbox.

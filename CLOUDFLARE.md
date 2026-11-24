@@ -149,3 +149,9 @@ npx wrangler d1 export sougabot-catalog --remote --output /私有目录/edge-d1.
 回滚顺序：停止新 importer / 采集器 → `python edge_admin.py delete-webhook`（保留 pending）→ 私有导出 D1 偏好和状态 → 按 Telegram 迁移规则恢复原本地/云端 Bot API → 恢复原配置，确认只有一个旧消费者后再启动旧 sougabot。回滚代码不等于把 Cloudflare 上新增的收藏自动写回旧 SQLite，必须单独迁移这些用户数据。不要删除 D1 或旧库来排除重复。
 
 目录同步的 HTTP 元数据写入最多四路并行，与媒体上传/下载并发无关。暂存接口遇到短暂 429/500/502/503/504 或网络错误会有限退避重试；发布确认丢失时核对 active generation，避免已成功发布却被误判成未发布。管理回调仅向 OWNER_IDS 中的用户开放，旧 `bridge_admin` 按钮经 inbox 交给原权限检查处理。
+
+### 交互延迟优化
+
+按钮、目录、收藏与页面跳转进入独立 `sougabot-ui` 队列，最多四个交互并发；整文件夹媒体和上架通知仍在 `sougabot-work`，不占用交互消费者。两条队列均显式配置批等待为 0。数据库对同一用户的活动发送任务加唯一约束，避免并发点击混发两个文件夹。私有 `/api/status` 返回最近已完成事件的队列等待与处理耗时，区分排队和 Telegram 网络等待。
+
+管理员 inbox 改为最长 15 秒等待、每秒检查一次；有消息立即返回，Python 成功处理后立即接收下一批，取消正常路径固定的两秒间隔。空闲时减少 HTTP 请求和心跳写入，异常时仍退避。新增部署需要先创建 `sougabot-ui` 队列，可再次运行 `Provision edge resources`，已有数据库和媒体队列会复用。

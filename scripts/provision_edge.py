@@ -30,9 +30,12 @@ def main():
     queue = next((x for x in queues if x['queue_name'] == 'sougabot-work'), None)
     if queue is None:
         queue = api('queues', {'queue_name': 'sougabot-work'})
+    ui_queue = next((x for x in queues if x['queue_name'] == 'sougabot-ui'), None)
+    if ui_queue is None:
+        ui_queue = api('queues', {'queue_name': 'sougabot-ui'})
     # IDs are configuration, not credentials. The artifact contains no secrets.
     Path('edge-resources.json').write_text(json.dumps({
-        'database_id': database['uuid'], 'queue_name': queue['queue_name']}, indent=2)+'\n')
+        'database_id': database['uuid'], 'queue_name': queue['queue_name'], 'ui_queue_name': ui_queue['queue_name']}, indent=2)+'\n')
     print('Cloudflare database and queue ready; IDs written to artifact.')
 
 

@@ -4,12 +4,52 @@
   "main": "src/worker.js",
   "compatibility_date": "2026-11-20",
   "workers_dev": true,
-  "vars": {"OWNER_IDS": "", "RELAY_USER_ID": ""},
-  "d1_databases": [{"binding": "DB", "database_name": "sougabot-catalog", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations"}],
-  "queues": {
-    "producers": [{"binding": "WORK", "queue": "sougabot-work"}],
-    "consumers": [{"queue": "sougabot-work", "max_batch_size": 1, "max_concurrency": 1, "max_retries": 3}]
+  "vars": {
+    "OWNER_IDS": "",
+    "RELAY_USER_ID": ""
   },
-  "triggers": {"crons": ["* * * * *"]},
-  "observability": {"enabled": true}
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "sougabot-catalog",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "WORK",
+        "queue": "sougabot-work"
+      },
+      {
+        "binding": "UI",
+        "queue": "sougabot-ui"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "sougabot-work",
+        "max_batch_size": 1,
+        "max_concurrency": 1,
+        "max_retries": 3,
+        "max_batch_timeout": 0
+      },
+      {
+        "queue": "sougabot-ui",
+        "max_batch_size": 1,
+        "max_batch_timeout": 0,
+        "max_concurrency": 4,
+        "max_retries": 3
+      }
+    ]
+  },
+  "triggers": {
+    "crons": [
+      "* * * * *"
+    ]
+  },
+  "observability": {
+    "enabled": true
+  }
 }
