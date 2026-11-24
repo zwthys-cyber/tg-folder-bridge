@@ -219,3 +219,29 @@ test('yielding after card send preserves panel cleanup and never resends the car
  await worker.queue({messages:broker.map(body=>({body,ack(){},retry(){throw Error('retry');}}))},f.env);
  assert.equal(f.calls.filter(x=>x.method==='sendPhoto').length,1);assert.equal(f.db.sql.prepare('SELECT count(*) n FROM panels').get().n,0);
 });
+
+test('warm public snapshots immediately follow publication and removal',async t=>{
+ const f=fixture(t);await publish(f);await f.webhook(update(1,'/start'));await f.drain();
+ await f.webhook(callback(2,'open:'+folder().id));await f.drain();
+ await publish(f,[folder('f'.repeat(16),'新目录1052')],'b'.repeat(32));
+ await f.webhook(update(3,'/start'));await f.drain();
+ const page=f.calls.filter(x=>x.method==='sendMessage' && x.body.text.includes('文件夹列表')).at(-1);
+ assert.ok(page.body.text.includes('新目录1052'));assert.ok(!page.body.text.includes('测试1051'));
+ await f.webhook(callback(4,'open:'+folder().id));await f.drain();assert.ok(f.calls.at(-1).body.text.includes('尚未就绪或已移除'));
+});
+test('warm directory cache never freezes favorite choices',async t=>{
+ const f=fixture(t);await publish(f);await f.webhook(update(1,'/start'));await f.drain();
+ await f.webhook(callback(2,'fav:'+folder().id));await f.drain();await f.webhook(update(3,'/favorites'));await f.drain();
+ assert.ok(f.calls.filter(x=>x.method==='sendMessage').at(-1).body.text.includes('共 1 个文件夹'));
+ await f.webhook(callback(4,'unfav:'+folder().id));await f.drain();await f.webhook(update(5,'/favorites'));await f.drain();
+ assert.ok(f.calls.filter(x=>x.method==='sendMessage').at(-1).body.text.includes('共 0 个文件夹'));
+});
+test('slow cosmetic callback acknowledgement does not block the actual card',async t=>{
+ const f=fixture(t);await publish(f,[{...folder(),cover:'photo'}]);let release;
+ const original=globalThis.fetch;
+ globalThis.fetch=(url,init)=>url.endsWith('/answerCallbackQuery')?new Promise(resolve=>{release=()=>resolve(Response.json({ok:true,result:true}));}):original(url,init);
+ await f.webhook(callback(1,'open:'+folder().id));const body={id:'update:1'};
+ const processing=worker.queue({messages:[{body,ack(){},retry(){throw Error('retry');}}]},f.env);
+ for(let i=0;i<30 && !f.calls.some(x=>x.method==='sendPhoto');i++)await new Promise(resolve=>setImmediate(resolve));
+ assert.ok(f.calls.some(x=>x.method==='sendPhoto'));assert.equal(typeof release,'function');release();await processing;
+});

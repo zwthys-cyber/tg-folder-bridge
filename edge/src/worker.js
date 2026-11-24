@@ -1,3 +1,4 @@
+import {cachedFolder,cachedPublicPage} from './catalog_cache.js';
 import {coverSource,multipartCover,COVER_LIMIT} from './cover.js';
 import {keyboard,button,chunks,albums,mediaCall,details,validateFolder,classify} from './model.js';
 const now=()=>Math.floor(Date.now()/1000);
@@ -60,25 +61,32 @@ async function enqueue(e,id,type,owner,payload,notify=true) {
   if(notify)await signal(e,id,type);
 }
 async function active(e){return (await first(e,"SELECT value FROM config WHERE key='active'"))?.value;}
-async function folder(e,id,generation){const row=await first(e,"SELECT payload FROM folders WHERE generation=coalesce(?,(SELECT value FROM config WHERE key='active')) AND id=?",generation||null,id);return row?JSON.parse(row.payload):null;}
+async function folder(e,id,generation){return cachedFolder(e.DB,id,generation,(sql,...args)=>first(e,sql,...args));}
 async function favorite(e,uid,id){return !!await first(e,'SELECT 1 FROM favorites WHERE owner=? AND job=?',uid,id);}
 function controls(f,saved){return keyboard([[button('📁 文件夹详情',`open:${f.id}`),button(saved?'⭐ 已收藏':'☆ 收藏',`${saved?'unfav':'fav'}:${f.id}`)],[button('⭐ 我的收藏','favorites:1'),button('📁 文件夹列表','list:1')]]);}
 async function list(e,uid,page,favorites,call,stats=false,search='') {
   page=Number(page)||1;
   if(!Number.isSafeInteger(page)||page<1){await call('sendMessage',{chat_id:uid,text:'请输入有效页码。'});return;}
-  const condition=favorites?' AND id IN (SELECT job FROM favorites WHERE owner=?)':search?' AND instr(lower(title),lower(?))>0':'';
-  const args=favorites?[uid]:search?[search]:[];
-  const scope="generation=(SELECT value FROM config WHERE key='active')";
-  const queries=[stmt(e,"SELECT value FROM config WHERE key='active'"),
-    stmt(e,'SELECT count(*) n FROM folders WHERE '+scope+condition,...args),
-    stmt(e,"SELECT id,title,json_array_length(payload,'$.items') n FROM folders WHERE "+scope+condition+' ORDER BY rank DESC,ordinal LIMIT 10 OFFSET ?',...args,(page-1)*10)];
-  if(stats)queries.push(stmt(e,"SELECT value FROM config WHERE key='stats'"));
-  const data=await batch(e,queries);
-  if(!data[0].results.length){await call('sendMessage',{chat_id:uid,text:'资源目录尚未接入，请稍后查看。'});return;}
-  const total=data[1].results[0].n,pages=Math.max(1,Math.ceil(total/10)),selected=data[2].results;
+  let total,selected,summary;
+  if(!favorites && !search){
+    const snapshot=await cachedPublicPage(e.DB,page,(sql,...args)=>first(e,sql,...args));
+    if(!snapshot){await call('sendMessage',{chat_id:uid,text:'资源目录尚未接入，请稍后查看。'});return;}
+    ({total,selected,summary}=snapshot);
+  }else{
+    const condition=favorites?' AND id IN (SELECT job FROM favorites WHERE owner=?)':' AND instr(lower(title),lower(?))>0';
+    const args=favorites?[uid]:[search];
+    const scope="generation=(SELECT value FROM config WHERE key='active')";
+    const queries=[stmt(e,"SELECT value FROM config WHERE key='active'"),
+      stmt(e,'SELECT count(*) n FROM folders WHERE '+scope+condition,...args),
+      stmt(e,"SELECT id,title,json_array_length(payload,'$.items') n FROM folders WHERE "+scope+condition+' ORDER BY rank DESC,ordinal LIMIT 10 OFFSET ?',...args,(page-1)*10)];
+    const data=await batch(e,queries);
+    if(!data[0].results.length){await call('sendMessage',{chat_id:uid,text:'资源目录尚未接入，请稍后查看。'});return;}
+    total=data[1].results[0].n;selected=data[2].results;
+  }
+  const pages=Math.max(1,Math.ceil(total/10));
   if(page>pages){await call('sendMessage',{chat_id:uid,text:`页码超出范围，请输入 1–${pages}。`});return;}
   let statsMessage=null;
-  if(stats){const summary=JSON.parse(data[3].results[0]?.value||'{}');statsMessage=await call('sendMessage',{chat_id:uid,text:`📊 资源统计\n　• 文件夹：${summary.folders||0} 个\n　• 消息：${summary.messages||0} 条\n　• 图片：${summary.photos||0} 张\n　• 视频：${summary.videos||0} 个`});}
+  if(stats){summary??=JSON.parse((await first(e,"SELECT value FROM config WHERE key='stats'"))?.value||'{}');statsMessage=await call('sendMessage',{chat_id:uid,text:`📊 资源统计\n　• 文件夹：${summary.folders||0} 个\n　• 消息：${summary.messages||0} 条\n　• 图片：${summary.photos||0} 张\n　• 视频：${summary.videos||0} 个`});}
   const buttons=chunks(selected.map((x,i)=>button(String(i+1),`open:${x.id}`)),5);
   let prefix=favorites?'favorites':'list';
   if(search){const digest=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(search)));const token=Array.from(digest.slice(0,6),x=>x.toString(16).padStart(2,'0')).join('');await run(e,'INSERT OR REPLACE INTO config VALUES(?,?)',`search:${uid}:${token}`,search);prefix=`search:${token}`;}
@@ -130,9 +138,14 @@ async function open(e,uid,id,origin,call) {
   if(origin)await removePanel(e,uid,origin,call);
 }
 async function userUpdate(e,event) {
-  const u=JSON.parse(event.payload),m=u.message,q=u.callback_query,uid=event.owner;
+  const u=JSON.parse(event.payload);
+  interactionBudget(e);
+  const acknowledgement=u.callback_query?telegram(e,'answerCallbackQuery',{callback_query_id:u.callback_query.id}).catch(()=>{}):Promise.resolve();
+  try{return await userAction(e,event,u);}finally{await acknowledgement;}
+}
+async function userAction(e,event,u) {
+  const m=u.message,q=u.callback_query,uid=event.owner;
   let seq=0;const call=(method,body,upload)=>send(e,`${event.id}:${seq++}`,method,body,upload);
-  if(q){interactionBudget(e);try{await telegram(e,'answerCallbackQuery',{callback_query_id:q.id});}catch{/* expired answers do not invalidate durable actions */}}
   let text=(m?.text||'').trim();let action=q?.data||'';
   // Previously emitted bridge buttons remain usable after migration.
   action=action.replace(/^bridge_catalog:/,'list:').replace(/^bridge_favorites:/,'favorites:').replace(/^bridge_open:/,'open:').replace(/^bridge_view:/,'view:').replace(/^bridge_fav:/,'fav:').replace(/^bridge_unfav:/,'unfav:').replace(/^bridge_notice:/,'notice:');
