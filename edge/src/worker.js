@@ -4,9 +4,11 @@ const now=()=>Math.floor(Date.now()/1000);
 const json=(value,status=200)=>Response.json(value,{status});
 const owners=e=>(e.OWNER_IDS||'').split(',').filter(Boolean).map(Number);
 const stmt=(e,sql,...args)=>e.DB.prepare(sql).bind(...args);
-const first=(e,sql,...args)=>stmt(e,sql,...args).first();
-const run=(e,sql,...args)=>stmt(e,sql,...args).run();
-const rows=async(e,sql,...args)=>(await stmt(e,sql,...args).all()).results;
+async function databaseCall(e,operation){const started=performance.now();try{return await operation();}finally{if(e.RUNTIME_METRICS)e.RUNTIME_METRICS.db_ms+=performance.now()-started;}}
+const first=(e,sql,...args)=>databaseCall(e,()=>stmt(e,sql,...args).first());
+const run=(e,sql,...args)=>databaseCall(e,()=>stmt(e,sql,...args).run());
+const rows=async(e,sql,...args)=>(await databaseCall(e,()=>stmt(e,sql,...args).all())).results;
+const batch=(e,statements)=>databaseCall(e,()=>e.DB.batch(statements));
 class Retry extends Error {constructor(seconds){super('Telegram retry');this.seconds=seconds;}}
 class Uncertain extends Error {}
 class DeferInteraction extends Error {}
@@ -17,7 +19,7 @@ async function same(a,b) {
   const digest=async x=>new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(x)));
   const [x,y]=await Promise.all([digest(a),digest(b)]);let n=0;for(let i=0;i<x.length;i++)n|=x[i]^y[i];return n===0;
 }
-async function telegram(e,method,body,upload) {
+async function telegramRequest(e,method,body,upload) {
   let response;
   try {response=await fetch(`https://api.telegram.org/bot${e.BOT_TOKEN}/${method}`,{method:'POST',...(upload||{headers:{'content-type':'application/json'},body:JSON.stringify(body)}),signal:AbortSignal.timeout(20000)});}
   catch {throw new Uncertain('Telegram network outcome unknown');}
@@ -27,16 +29,19 @@ async function telegram(e,method,body,upload) {
   if(value.error_code===429)throw new Retry(Math.max(1,value.parameters?.retry_after||30));
   throw Error(`Telegram rejected ${method}: ${value.error_code||response.status}`);
 }
+async function telegram(e,method,body,upload){const started=performance.now();try{return await telegramRequest(e,method,body,upload);}finally{if(e.RUNTIME_METRICS)e.RUNTIME_METRICS.telegram_ms+=performance.now()-started;}}
 // A successful operation is replayed from its receipt, never re-sent. A crashed
 // in-flight operation is uncertain: automatic recovery cannot duplicate media.
 async function send(e,id,method,body,upload) {
   try{interactionBudget(e);}catch(error){if(upload?.body)await upload.body.cancel();throw error;}
-  let old=await first(e,'SELECT * FROM sends WHERE id=?',id);
-  if(old?.state==='sent')return JSON.parse(old.response);
-  if(old?.state==='failed')throw Error(old.error);
-  if(old && old.state!=='retry')throw new Uncertain('Prior send requires inspection');
-  const claim=old?await run(e,"UPDATE sends SET state='sending' WHERE id=? AND state='retry'",id):await run(e,"INSERT OR IGNORE INTO sends(id,state) VALUES(?,'sending')",id);
-  if(!claim.meta.changes)throw new Uncertain('Send already claimed');
+  const claimed=await first(e,"INSERT INTO sends(id,state) VALUES(?,'sending') ON CONFLICT(id) DO UPDATE SET state='sending' WHERE sends.state='retry' RETURNING id",id);
+  if(!claimed){
+    const old=await first(e,'SELECT * FROM sends WHERE id=?',id);
+    if(upload?.body)await upload.body.cancel();
+    if(old?.state==='sent')return JSON.parse(old.response);
+    if(old?.state==='failed')throw Error(old.error);
+    throw new Uncertain('Prior send requires inspection');
+  }
   try {
     const value=await telegram(e,method,body,upload);
     await run(e,"UPDATE sends SET state='sent',response=? WHERE id=?",JSON.stringify(value),id);
@@ -55,20 +60,25 @@ async function enqueue(e,id,type,owner,payload,notify=true) {
   if(notify)await signal(e,id,type);
 }
 async function active(e){return (await first(e,"SELECT value FROM config WHERE key='active'"))?.value;}
-async function folder(e,id,generation){const row=await first(e,'SELECT payload FROM folders WHERE generation=? AND id=?',generation||await active(e),id);return row?JSON.parse(row.payload):null;}
+async function folder(e,id,generation){const row=await first(e,"SELECT payload FROM folders WHERE generation=coalesce(?,(SELECT value FROM config WHERE key='active')) AND id=?",generation||null,id);return row?JSON.parse(row.payload):null;}
 async function favorite(e,uid,id){return !!await first(e,'SELECT 1 FROM favorites WHERE owner=? AND job=?',uid,id);}
 function controls(f,saved){return keyboard([[button('📁 文件夹详情',`open:${f.id}`),button(saved?'⭐ 已收藏':'☆ 收藏',`${saved?'unfav':'fav'}:${f.id}`)],[button('⭐ 我的收藏','favorites:1'),button('📁 文件夹列表','list:1')]]);}
 async function list(e,uid,page,favorites,call,stats=false,search='') {
-  const generation=await active(e);
-  if(!generation){await call('sendMessage',{chat_id:uid,text:'资源目录尚未接入，请稍后查看。'});return;}
+  page=Number(page)||1;
+  if(!Number.isSafeInteger(page)||page<1){await call('sendMessage',{chat_id:uid,text:'请输入有效页码。'});return;}
   const condition=favorites?' AND id IN (SELECT job FROM favorites WHERE owner=?)':search?' AND instr(lower(title),lower(?))>0':'';
   const args=favorites?[uid]:search?[search]:[];
-  const total=(await first(e,'SELECT count(*) AS n FROM folders WHERE generation=?'+condition,generation,...args)).n;
-  const pages=Math.max(1,Math.ceil(total/10));page=Number(page)||1;
-  if(!Number.isSafeInteger(page)||page<1||page>pages){await call('sendMessage',{chat_id:uid,text:`页码超出范围，请输入 1–${pages}。`});return;}
+  const scope="generation=(SELECT value FROM config WHERE key='active')";
+  const queries=[stmt(e,"SELECT value FROM config WHERE key='active'"),
+    stmt(e,'SELECT count(*) n FROM folders WHERE '+scope+condition,...args),
+    stmt(e,"SELECT id,title,json_array_length(payload,'$.items') n FROM folders WHERE "+scope+condition+' ORDER BY rank DESC,ordinal LIMIT 10 OFFSET ?',...args,(page-1)*10)];
+  if(stats)queries.push(stmt(e,"SELECT value FROM config WHERE key='stats'"));
+  const data=await batch(e,queries);
+  if(!data[0].results.length){await call('sendMessage',{chat_id:uid,text:'资源目录尚未接入，请稍后查看。'});return;}
+  const total=data[1].results[0].n,pages=Math.max(1,Math.ceil(total/10)),selected=data[2].results;
+  if(page>pages){await call('sendMessage',{chat_id:uid,text:`页码超出范围，请输入 1–${pages}。`});return;}
   let statsMessage=null;
-  if(stats){const summary=JSON.parse((await first(e,"SELECT value FROM config WHERE key='stats'"))?.value||'{}');statsMessage=await call('sendMessage',{chat_id:uid,text:`📊 资源统计\n　• 文件夹：${summary.folders||0} 个\n　• 消息：${summary.messages||0} 条\n　• 图片：${summary.photos||0} 张\n　• 视频：${summary.videos||0} 个`});}
-  const selected=await rows(e,'SELECT id,title,json_array_length(payload,\'$.items\') AS n FROM folders WHERE generation=?'+condition+' ORDER BY rank DESC,ordinal LIMIT 10 OFFSET ?',generation,...args,(page-1)*10);
+  if(stats){const summary=JSON.parse(data[3].results[0]?.value||'{}');statsMessage=await call('sendMessage',{chat_id:uid,text:`📊 资源统计\n　• 文件夹：${summary.folders||0} 个\n　• 消息：${summary.messages||0} 条\n　• 图片：${summary.photos||0} 张\n　• 视频：${summary.videos||0} 个`});}
   const buttons=chunks(selected.map((x,i)=>button(String(i+1),`open:${x.id}`)),5);
   let prefix=favorites?'favorites':'list';
   if(search){const digest=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(search)));const token=Array.from(digest.slice(0,6),x=>x.toString(16).padStart(2,'0')).join('');await run(e,'INSERT OR REPLACE INTO config VALUES(?,?)',`search:${uid}:${token}`,search);prefix=`search:${token}`;}
@@ -91,9 +101,8 @@ async function removePanel(e,uid,message,call){
   await run(e,'DELETE FROM panels WHERE chat=? AND message=?',uid,message);
 }
 async function open(e,uid,id,origin,call) {
-  const f=await folder(e,id);if(!f){await call('sendMessage',{chat_id:uid,text:'文件夹尚未就绪或已移除。'});return;}
+  const [f,saved]=await Promise.all([folder(e,id),favorite(e,uid,id)]);if(!f){await call('sendMessage',{chat_id:uid,text:'文件夹尚未就绪或已移除。'});return;}
   if(e.UI_DEADLINE && f.items.length>200)throw new DeferInteraction();
-  const saved=await favorite(e,uid,id);
   const keys=keyboard([[button('查看内容',`view:${id}`)],[button(saved?'⭐ 已收藏':'☆ 收藏',`${saved?'unfav':'fav'}:${id}`),button('⭐ 我的收藏','favorites:1')],[button('文件夹列表','list:1')]]);
   const body={chat_id:uid,reply_markup:keys};
   let photo=f.cover,upload=null;const source=coverSource(f);
@@ -116,7 +125,7 @@ async function open(e,uid,id,origin,call) {
     catch(error){if(error instanceof Retry || error instanceof Uncertain || error instanceof DeferInteraction)throw error;}
   }
   if(!card)card=await call('sendMessage',{...body,text:details(f)});
-  if(source && card.photo?.length)await run(e,'INSERT OR REPLACE INTO cover_cache VALUES(?,?,?)',id,source.file_id,card.photo.at(-1).file_id);
+  if(upload && source && card.photo?.length)await run(e,'INSERT OR REPLACE INTO cover_cache VALUES(?,?,?)',id,source.file_id,card.photo.at(-1).file_id);
   await run(e,'INSERT OR REPLACE INTO cards VALUES(?,?,?)',uid,card.message_id,id);
   if(origin)await removePanel(e,uid,origin,call);
 }
@@ -214,13 +223,13 @@ async function delivery(e,event){
   return true;
 }
 async function process(e,id,interactive=false){
-  const claim=await run(e,"UPDATE events SET state='processing',touched=?,started_ms=CASE WHEN started_ms=0 THEN ? ELSE started_ms END WHERE id=? AND state='pending' AND next_at<=?",now(),Date.now(),id,now());
-  if(!claim.meta.changes)return;
-  const event=await first(e,'SELECT * FROM events WHERE id=?',id);
+  e={...e,RUNTIME_METRICS:{db_ms:0,telegram_ms:0}};
+  const event=await first(e,"UPDATE events SET state='processing',touched=?,started_ms=CASE WHEN started_ms=0 THEN ? ELSE started_ms END WHERE id=? AND state='pending' AND next_at<=? RETURNING *",now(),Date.now(),id,now());
+  if(!event)return;
   try{
     const interactiveEnv=interactive?{...e,UI_DEADLINE:Date.now()+25000}:e;
     const done=event.type==='delivery'?await delivery(e,event):event.type==='notice'?await notice(e,event):await userUpdate(interactiveEnv,event);
-    if(done!==false)await run(e,"UPDATE events SET state='complete',touched=?,finished_ms=? WHERE id=?",now(),Date.now(),id);
+    if(done!==false)await run(e,"UPDATE events SET state='complete',touched=?,finished_ms=?,db_ms=?,telegram_ms=? WHERE id=?",now(),Date.now(),Math.round(e.RUNTIME_METRICS.db_ms),Math.round(e.RUNTIME_METRICS.telegram_ms),id);
   }catch(error){
     if(error instanceof DeferInteraction){await run(e,"UPDATE events SET state='pending',next_at=0,touched=? WHERE id=?",now(),id);await signal(e,id,event.type);return;}
     const retry=error instanceof Retry;
@@ -234,7 +243,7 @@ async function process(e,id,interactive=false){
 async function notice(e,event){const f=JSON.parse(event.payload);if(!(await first(e,'SELECT enabled FROM subscribers WHERE owner=?',event.owner))?.enabled)return;await send(e,event.id,'sendMessage',{chat_id:event.owner,text:`📁 新文件夹已上架\n\n${f.title}\n共 ${f.count} 个文件`,reply_markup:keyboard([[button('查看文件夹',`open:${f.id}`)],[button('取消更新通知','notice:off')]])});}
 async function api(request,e,path){
   if(!await same(request.headers.get('authorization'),`Bearer ${e.SYNC_TOKEN}`) || !e.SYNC_TOKEN)return json({error:'Unauthorized'},401);
-  if(path==='/api/status')return json({active:await active(e),events:await rows(e,'SELECT state,count(*) count FROM events GROUP BY state'),latency:await rows(e,"SELECT type,count(*) samples,round(avg(started_ms-created_ms)) queue_ms,round(avg(finished_ms-started_ms)) processing_ms FROM (SELECT * FROM events WHERE created_ms>0 AND finished_ms>0 ORDER BY created_ms DESC LIMIT 30) GROUP BY type")});
+  if(path==='/api/status')return json({active:await active(e),events:await rows(e,'SELECT state,count(*) count FROM events GROUP BY state'),latency:await rows(e,"SELECT type,count(*) samples,round(avg(started_ms-created_ms)) queue_ms,round(avg(finished_ms-started_ms)) processing_ms,round(avg(db_ms)) db_ms,round(avg(telegram_ms)) telegram_ms FROM (SELECT * FROM events WHERE created_ms>0 AND finished_ms>0 AND db_ms>0 ORDER BY created_ms DESC LIMIT 30) GROUP BY type")});
   if(path==='/api/inbox/claim'){
     await run(e,"INSERT OR REPLACE INTO config VALUES('importer_heartbeat',?)",String(now()));
     const wait=Math.min(15000,Math.max(0,Number(new URL(request.url).searchParams.get('wait')??15000)||0));
