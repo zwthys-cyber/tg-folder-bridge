@@ -20,7 +20,7 @@ def snapshot(path):
         folders = []
         for job in store.catalog():
             items = []
-            cover = None
+            cover = job.get('cover_file_id') or None
             for item in store.files(job['id']):
                 if cover is None and (item.get('source_kind') == 'photo' or
                         Path(item.get('source_name') or '').suffix.lower() in {'.jpg', '.jpeg', '.heic', '.heif', '.png', '.webp'}):

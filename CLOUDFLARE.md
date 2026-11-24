@@ -112,6 +112,8 @@ python edge_importer.py
 
 6. 验收 `/start`、翻页/跳转、封面卡片、收藏、整个文件夹发送、订阅、管理员 `/status` 和一个允许的新转存任务。再停止 Codespace 验证已有目录仍能使用，管理员面板显示转存离线。
 
+已有私有 Supervisor runtime 可使用 `deploy/edge_runtime.py install --runtime /绝对路径/runtime` 安装转存入口；先停止旧 souga / collector，该工具会拒绝覆盖仍在运行的消费者，备份原配置和启动器，并保留所有数据库。安装后通过 Supervisor reread/update 启动；重启入口 `runtime/start.py` 保留新模式，原启动器在 `runtime/backups/edge-cutover`。该工具不会自行切 Webhook。
+
 默认 importer 每小时检查一次公开目录变化，未变化不上传；**新增目录和通知最多会滞后一个同步周期**。初次手动迁移立即生效。当前采用完整目录快照，以减少实现歧义；大规模高频更新前应评估 D1 写入配额，再考虑增量版本。
 
 ## 5. 故障处理与配额

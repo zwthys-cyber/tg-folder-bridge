@@ -22,6 +22,7 @@ class EdgeExportTests(unittest.TestCase):
                                      (job, 'same-bot-original-id', 'video'))
                     store.db.execute('INSERT INTO source_entries VALUES(?,2,3,0,?,1024,?)',
                                      (job, 'IMG_0001.MOV', 'video'))
+                store.db.execute('UPDATE jobs SET cover_file_id=? WHERE id=?', ('cached-photo-id', 'a'*16))
                 store.db.execute('INSERT INTO favorites VALUES(1,?)', ('a'*16,))
                 store.db.execute('INSERT INTO subscribers VALUES(1,1)')
             store.db.close()
@@ -31,6 +32,7 @@ class EdgeExportTests(unittest.TestCase):
             self.assertEqual([x['id'] for x in result['folders']], ['a'*16])
             self.assertEqual(result['folders'][0]['items'][0]['file_id'], 'same-bot-original-id')
             self.assertEqual(result['folders'][0]['items'][0]['name'], 'IMG_0001.MOV')
+            self.assertEqual(result['folders'][0]['cover'], 'cached-photo-id')
             self.assertEqual(result['subscribers'], [{'owner': 1, 'enabled': 1}])
             db = sqlite3.connect(path)
             self.assertEqual(db.execute("SELECT state FROM jobs WHERE id=?", ('b'*16,)).fetchone()[0], 'cancelled')
