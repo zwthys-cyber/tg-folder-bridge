@@ -39,7 +39,7 @@ from delivery import WholeDelivery
 from notifications import Notifications
 import automation_control
 
-VERSION = '0.12.0'
+VERSION = '0.13.0'
 
 
 class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):

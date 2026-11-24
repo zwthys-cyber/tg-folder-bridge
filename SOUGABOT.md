@@ -1,5 +1,7 @@
 # 接入已有 sougabot（0.11.0）
 
+继续沿用现有 sougabot 时使用本页。要摆脱 Codespaces 常驻限制，请使用 [Cloudflare 迁移流程](CLOUDFLARE.md)；新入口 `edge_importer.py` 不调用 getUpdates，不能与本页旧轮询同时启动。
+
 目标为 Python 3.13、urllib 调用 Bot API、唯一的 getUpdates 长轮询、systemd 服务 `sougabot`。示例路径为 `/root/sougabot` 和 `/root/tg-folder-bridge`；现有搜索数据库保持在 `/root/sougabot/resources.db`。
 
 ## 已接入的服务器

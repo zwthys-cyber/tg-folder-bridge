@@ -30,7 +30,7 @@ def snapshot(path):
                     file_size=item.get('file_size'), name=item.get('source_name') or '',
                     caption=(item.get('caption') or '')[:1024]))
             folder = {key: job.get(key) or '' for key in
-                ('id', 'title', 'partial_notice', 'source_created_at', 'source_updated_at')}
+                ('id', 'title', 'state', 'partial_notice', 'source_created_at', 'source_updated_at')}
             folder['title'] = (folder['title'] or '文件夹 ' + job['id'][:8])[:160]
             folder.update(items=items, cover=cover)
             if len(json.dumps(folder, ensure_ascii=False).encode()) > 900000:
@@ -64,8 +64,8 @@ class EdgeClient:
             self.call('sync/folder', dict(generation=generation, ordinal=i, folder=folder))
         if seed:
             for kind in ('favorites', 'subscribers'):
-                for start in range(0, len(data[kind]), 50):
-                    self.call('sync/preferences', {'generation': generation, kind: data[kind][start:start+50]})
+                for start in range(0, len(data[kind]), 20):
+                    self.call('sync/preferences', {'generation': generation, kind: data[kind][start:start+20]})
         return self.call('sync/publish', dict(generation=generation))
 
 

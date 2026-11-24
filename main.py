@@ -10,6 +10,8 @@ from bot_api_config import configure
 
 def main():
     load_dotenv()
+    if os.getenv('EDGE_MODE') == '1':
+        raise RuntimeError('EDGE_MODE requires edge_importer.py; polling must stay disabled')
     os.umask(0o077)
     bridge = Bridge()
     app = (configure(Application.builder().token(os.environ['BOT_TOKEN']))

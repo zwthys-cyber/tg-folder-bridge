@@ -1,5 +1,7 @@
 # 部署与接入（0.11.0）
 
+新增 [Cloudflare 日常服务部署](CLOUDFLARE.md)：适用于 Codespaces 停机后仍需提供目录和已有文件的场景。下文是原 Python 单机/适配器部署；两种模式不能同时消费同一机器人的更新。
+
 ## 获取代码与选择模式
 
 GitHub Actions 的成功 Check 提供 `tg-folder-bridge` Artifact，包含源码 ZIP 和 SHA256SUMS；也可使用 Git 仓库。检查与打包在 GitHub 执行，登录和服务在实际部署服务器执行。

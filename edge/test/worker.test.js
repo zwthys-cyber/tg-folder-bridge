@@ -26,7 +26,7 @@ function fixture(t){
   return {db,env,api,webhook,drain,calls,fault(f){fault=f;}};
 }
 const item=(kind='document',id='file')=>({kind,file_id:id,source_kind:kind,file_size:1024,caption:'',name:'IMG_0001.MOV'});
-const folder=(id='0123456789abcdef',title='测试1051')=>({id,title,items:[item()],cover:null});
+const folder=(id='0123456789abcdef',title='测试1051')=>({id,title,state:'complete',items:[item()],cover:null});
 async function publish(f,folders=[folder()],id='a'.repeat(32)){
   assert.equal((await f.api('sync/begin',{id,bot_id:99,count:folders.length})).status,200);
   for(const [ordinal,x] of folders.entries())assert.equal((await f.api('sync/folder',{generation:id,ordinal,folder:x})).status,200);

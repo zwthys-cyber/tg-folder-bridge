@@ -1,0 +1,4 @@
+# Copy to .dev.vars for local development only. Never commit real values.
+BOT_TOKEN=
+WEBHOOK_SECRET=
+SYNC_TOKEN=

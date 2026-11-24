@@ -208,7 +208,7 @@ async function api(request,e,path){
   if(path==='/api/sync/preferences'){
     // Seed only on first migration; later snapshots never overwrite edge choices.
     if(await active(e))return json({error:'Preferences already owned by edge'},409);
-    const prefs=(body.favorites||[]).slice(0,100),subs=(body.subscribers||[]).slice(0,100);
+    const prefs=(body.favorites||[]).slice(0,20),subs=(body.subscribers||[]).slice(0,20);
     const statements=[...prefs.map(x=>stmt(e,'INSERT OR IGNORE INTO favorites VALUES(?,?)',x.owner,x.job)),...subs.map(x=>stmt(e,'INSERT OR IGNORE INTO subscribers VALUES(?,?)',x.owner,x.enabled?1:0))];
     if(statements.length)await e.DB.batch(statements);return json({ok:true});
   }
@@ -221,8 +221,8 @@ async function api(request,e,path){
     // No historical broadcast on initial migration. Later new folders get an
     // outbox row in the same atomic D1 batch as catalog publication.
     const statements=[];
-    if(old)statements.push(stmt(e,"INSERT OR IGNORE INTO events(id,type,owner,payload,touched) SELECT 'notice:'||f.id||':'||s.owner,'notice',s.owner,json_object('id',f.id,'title',f.title,'count',json_array_length(f.payload,'$.items')),? FROM folders f CROSS JOIN subscribers s WHERE f.generation=? AND s.enabled=1 AND f.id NOT IN (SELECT job FROM notice_seen)",now(),generation.id));
-    statements.push(stmt(e,'INSERT OR IGNORE INTO notice_seen SELECT id FROM folders WHERE generation=?',generation.id),stmt(e,"INSERT OR REPLACE INTO config VALUES('active',?)",generation.id),stmt(e,"INSERT OR REPLACE INTO config VALUES('stats',?)",JSON.stringify(stats)),stmt(e,"UPDATE generations SET state='published' WHERE id=?",generation.id));
+    if(old)statements.push(stmt(e,"INSERT OR IGNORE INTO events(id,type,owner,payload,touched) SELECT 'notice:'||f.id||':'||s.owner,'notice',s.owner,json_object('id',f.id,'title',f.title,'count',json_array_length(f.payload,'$.items')),? FROM folders f CROSS JOIN subscribers s WHERE f.generation=? AND s.enabled=1 AND json_extract(f.payload,'$.state')='complete' AND f.id NOT IN (SELECT job FROM notice_seen)",now(),generation.id));
+    statements.push(stmt(e,"INSERT OR IGNORE INTO notice_seen SELECT id FROM folders WHERE generation=? AND (json_extract(payload,'$.state')='complete' OR ?=1)",generation.id,old?0:1),stmt(e,"INSERT OR REPLACE INTO config VALUES('active',?)",generation.id),stmt(e,"INSERT OR REPLACE INTO config VALUES('stats',?)",JSON.stringify(stats)),stmt(e,"UPDATE generations SET state='published' WHERE id=?",generation.id));
     await e.DB.batch(statements);return json({ok:true,stats});
   }
   return json({error:'Not found'},404);

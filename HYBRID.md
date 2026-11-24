@@ -1,5 +1,7 @@
 # 按容量选择上传通道（0.9.0）
 
+分层 [Cloudflare 模式](CLOUDFLARE.md)使用云 Bot API + 用户中转，当前不支持本页本地混合上传路径。原单机模式仍可使用 hybrid；迁移时不要把本地收件入口与云 Webhook 混用。
+
 `UPLOAD_BACKEND=hybrid` 根据实际字节数路由：
 
 | 原文件大小 | 通道 |

@@ -16,7 +16,7 @@ jobs:
           node-version: '24'
       - name: Install pinned Wrangler
         working-directory: edge
-        run: npm install --ignore-scripts --no-audit --no-fund
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Syntax and real SQLite integration tests
         working-directory: edge
         run: |

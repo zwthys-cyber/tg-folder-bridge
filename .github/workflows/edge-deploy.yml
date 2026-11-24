@@ -1,0 +1,53 @@
+name: Deploy edge service
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: edge-production
+  cancel-in-progress: false
+jobs:
+  deploy:
+    environment: cloudflare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Require deployment settings
+        env:
+          DATABASE_ID: ${{ vars.EDGE_DATABASE_ID }}
+          OWNER_IDS: ${{ vars.EDGE_OWNER_IDS }}
+          RELAY_USER_ID: ${{ vars.EDGE_RELAY_USER_ID }}
+        run: |
+          python3 - <<'PY'
+          import json, os, uuid
+          for key in ('CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID', 'DATABASE_ID', 'OWNER_IDS', 'RELAY_USER_ID'):
+              if not os.environ.get(key): raise SystemExit('Missing configuration: '+key)
+          uuid.UUID(os.environ['DATABASE_ID'])
+          path='edge/wrangler.jsonc'
+          config=json.load(open(path))
+          config['d1_databases'][0]['database_id']=os.environ['DATABASE_ID']
+          config['vars'].update(OWNER_IDS=os.environ['OWNER_IDS'],RELAY_USER_ID=os.environ['RELAY_USER_ID'])
+          open(path,'w').write(json.dumps(config,indent=2)+'\n')
+          PY
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: edge
+      - name: Validate before deploying
+        working-directory: edge
+        run: |
+          npm run check
+          npm test
+          npm run build
+      - name: Migrate D1 and publish Worker
+        working-directory: edge
+        run: |
+          npx wrangler d1 migrations apply sougabot-catalog --remote
+          npx wrangler deploy
+      # Bot/webhook secrets are provisioned separately via `wrangler secret put`.
+      # Deploying code never changes Telegram's update destination automatically.

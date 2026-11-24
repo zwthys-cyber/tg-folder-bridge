@@ -1,5 +1,7 @@
 # 运维、备份与验收（0.9.0）
 
+0.13.0 新增分层运行模式，见 [Cloudflare 运维、备份和回滚](CLOUDFLARE.md)。D1 保存迁移后的用户偏好与发送状态，必须独立备份；Python SQLite 与现有加密包不能替代新 D1 备份。下文仍适用于原 Python 单机模式。
+
 ## 当前部署基线
 
 桥接可独立运行，也可在现有 sougabot 中沿用唯一的 getUpdates。实际已接入服务器的程序目录、服务名、Token 文件与数据库以自身配置为准；文档示例使用 `/root/tg-folder-bridge`、`/root/sougabot` 和 `sougabot`。

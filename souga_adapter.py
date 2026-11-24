@@ -85,6 +85,8 @@ class SougaBridge:
         configured = Path(os.getenv('DATA_DIR', 'data'))
         if not configured.is_absolute():
             os.environ['DATA_DIR'] = str(self.env_file.parent / configured)
+        if os.getenv('EDGE_MODE') == '1':
+            raise RuntimeError('EDGE_MODE requires edge_importer.py, not the polling adapter')
         self.bridge = Bridge()
         self.app = configure(Application.builder().token(self.token).updater(None)).build()
         self.bridge.install(self.app)
