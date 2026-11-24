@@ -1,3 +1,4 @@
+import {coverSource,multipartCover,COVER_LIMIT} from './cover.js';
 import {keyboard,button,chunks,albums,mediaCall,details,validateFolder,classify} from './model.js';
 const now=()=>Math.floor(Date.now()/1000);
 const json=(value,status=200)=>Response.json(value,{status});
@@ -14,9 +15,9 @@ async function same(a,b) {
   const digest=async x=>new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(x)));
   const [x,y]=await Promise.all([digest(a),digest(b)]);let n=0;for(let i=0;i<x.length;i++)n|=x[i]^y[i];return n===0;
 }
-async function telegram(e,method,body) {
+async function telegram(e,method,body,upload) {
   let response;
-  try {response=await fetch(`https://api.telegram.org/bot${e.BOT_TOKEN}/${method}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(20000)});}
+  try {response=await fetch(`https://api.telegram.org/bot${e.BOT_TOKEN}/${method}`,{method:'POST',...(upload||{headers:{'content-type':'application/json'},body:JSON.stringify(body)}),signal:AbortSignal.timeout(20000)});}
   catch {throw new Uncertain('Telegram network outcome unknown');}
   if(response.status>=500)throw new Uncertain('Telegram server outcome unknown');
   let value;try{value=await response.json();}catch{throw new Uncertain('Telegram response unreadable');}
@@ -26,14 +27,15 @@ async function telegram(e,method,body) {
 }
 // A successful operation is replayed from its receipt, never re-sent. A crashed
 // in-flight operation is uncertain: automatic recovery cannot duplicate media.
-async function send(e,id,method,body) {
+async function send(e,id,method,body,upload) {
   let old=await first(e,'SELECT * FROM sends WHERE id=?',id);
   if(old?.state==='sent')return JSON.parse(old.response);
+  if(old?.state==='failed')throw Error(old.error);
   if(old && old.state!=='retry')throw new Uncertain('Prior send requires inspection');
   const claim=old?await run(e,"UPDATE sends SET state='sending' WHERE id=? AND state='retry'",id):await run(e,"INSERT OR IGNORE INTO sends(id,state) VALUES(?,'sending')",id);
   if(!claim.meta.changes)throw new Uncertain('Send already claimed');
   try {
-    const value=await telegram(e,method,body);
+    const value=await telegram(e,method,body,upload);
     await run(e,"UPDATE sends SET state='sent',response=? WHERE id=?",JSON.stringify(value),id);
     return value;
   } catch(error) {
@@ -87,13 +89,32 @@ async function open(e,uid,id,origin,call) {
   const saved=await favorite(e,uid,id);
   const keys=keyboard([[button('查看内容',`view:${id}`)],[button(saved?'⭐ 已收藏':'☆ 收藏',`${saved?'unfav':'fav'}:${id}`),button('⭐ 我的收藏','favorites:1')],[button('文件夹列表','list:1')]]);
   const body={chat_id:uid,reply_markup:keys};
-  const card=await call(f.cover?'sendPhoto':'sendMessage',f.cover?{...body,photo:f.cover,caption:details(f)}:{...body,text:details(f)});
+  let photo=f.cover,upload=null;const source=coverSource(f);
+  if(!photo && source){
+    const cached=await first(e,'SELECT photo_id FROM cover_cache WHERE job=? AND source_id=?',id,source.file_id);
+    photo=cached?.photo_id;
+    if(!photo){
+      try{
+        const file=await telegram(e,'getFile',{file_id:source.file_id});
+        if(!file.file_path || file.file_size>COVER_LIMIT)throw Error('Cover unavailable');
+        const response=await fetch(`https://api.telegram.org/file/bot${e.BOT_TOKEN}/${file.file_path}`,{signal:AbortSignal.timeout(15000)});
+        upload=multipartCover(response,{...body,caption:details(f)},/\.png$/i.test(source.name)?'cover.png':'cover.jpg');
+      }catch{/* bounded preview failure must not prevent opening the folder */}
+    }
+  }
+  let card;
+  if(photo || upload){
+    try{card=await call('sendPhoto',{...body,photo,caption:details(f)},upload);}
+    catch(error){if(error instanceof Retry || error instanceof Uncertain)throw error;}
+  }
+  if(!card)card=await call('sendMessage',{...body,text:details(f)});
+  if(source && card.photo?.length)await run(e,'INSERT OR REPLACE INTO cover_cache VALUES(?,?,?)',id,source.file_id,card.photo.at(-1).file_id);
   await run(e,'INSERT OR REPLACE INTO cards VALUES(?,?,?)',uid,card.message_id,id);
   if(origin)await removePanel(e,uid,origin,call);
 }
 async function userUpdate(e,event) {
   const u=JSON.parse(event.payload),m=u.message,q=u.callback_query,uid=event.owner;
-  let seq=0;const call=(method,body)=>send(e,`${event.id}:${seq++}`,method,body);
+  let seq=0;const call=(method,body,upload)=>send(e,`${event.id}:${seq++}`,method,body,upload);
   if(q){try{await telegram(e,'answerCallbackQuery',{callback_query_id:q.id});}catch{/* expired answers do not invalidate durable actions */}}
   let text=(m?.text||'').trim();let action=q?.data||'';
   // Previously emitted bridge buttons remain usable after migration.

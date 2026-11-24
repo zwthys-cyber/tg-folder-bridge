@@ -3,6 +3,7 @@
 部署、迁移、配额、当前兼容边界与回滚均见 [CLOUDFLARE.md](../CLOUDFLARE.md)。新增代码不会自动切换正在运行的机器人。
 
 - `src/model.js`：展示顺序、原生媒体相册、详情和输入校验。
+- `src/cover.js`：小型 JPEG/PNG 封面流式上传，2 MiB 硬上限，原件不变。
 - `src/worker.js`：已认证的 Webhook、D1 目录和偏好、持久发送队列、私有 importer inbox、目录分阶段发布。
 - `migrations/0001_edge.sql`：独立 D1 schema，不是原生产 SQLite 的整库复制。
 - `test/worker.test.js`：Node 24 内置 SQLite 的集成测试，Telegram 网络仅使用可控桩；不调用真实机器人。

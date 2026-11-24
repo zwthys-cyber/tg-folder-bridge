@@ -5,7 +5,7 @@ import {readFileSync} from 'node:fs';
 import worker from '../src/worker.js';
 import {order,albums,mediaCall,classify,validateFolder} from '../src/model.js';
 class DB {
-  constructor(){this.sql=new DatabaseSync(':memory:');this.sql.exec(readFileSync(new URL('../migrations/0001_edge.sql',import.meta.url),'utf8'));}
+  constructor(){this.sql=new DatabaseSync(':memory:');this.sql.exec(readFileSync(new URL('../migrations/0001_edge.sql',import.meta.url),'utf8'));this.sql.exec(readFileSync(new URL('../migrations/0002_cover_cache.sql',import.meta.url),'utf8'));}
   prepare(query){const sql=this.sql;let params=[];const statement={bind(...values){params=values;return statement;},async first(){return sql.prepare(query).get(...params)||null;},async all(){return {results:sql.prepare(query).all(...params)};},async run(){const result=sql.prepare(query).run(...params);return {meta:{changes:Number(result.changes)}};}};return statement;}
   async batch(statements){this.sql.exec('BEGIN');try{const out=[];for(const s of statements)out.push(await s.run());this.sql.exec('COMMIT');return out;}catch(e){this.sql.exec('ROLLBACK');throw e;}}
 }
@@ -13,8 +13,14 @@ function fixture(t){
   const db=new DB(),queue=[],calls=[];let fault=null;
   const old=globalThis.fetch;
   globalThis.fetch=async(url,init)=>{
-    const method=url.split('/').at(-1),body=JSON.parse(init.body);calls.push({method,body});
+    if(url.includes('/file/bot'))return new Response(new Uint8Array([1,2,3]),{headers:{'content-length':'3'}});
+    const method=url.split('/').at(-1);let body;
+    if(typeof init.body==='string')body=JSON.parse(init.body);
+    else{body={multipart:true};const reader=init.body.getReader();while(!(await reader.read()).done){/* bounded synthetic image stream */}}
+    calls.push({method,body});
     if(fault && fault.method===method){const f=fault;fault=null;if(f.type==='network')throw Error('timeout');return Response.json({ok:false,error_code:429,parameters:{retry_after:1}});}
+    if(method==='getFile')return Response.json({ok:true,result:{file_path:'documents/source.jpg',file_size:3}});
+    if(method==='sendPhoto')return Response.json({ok:true,result:{message_id:calls.length,photo:[{file_id:'cached-cover-photo'}]}});
     if(method==='getMe')return Response.json({ok:true,result:{id:99}});
     return Response.json({ok:true,result:method==='sendMediaGroup'?body.media.map((_,i)=>({message_id:calls.length+i})): {message_id:calls.length}});
   };
@@ -155,4 +161,14 @@ test('repeated clicks on an old favorite button cannot accidentally unsubscribe'
 test('only owners may route legacy administrative callbacks to the importer',()=>{
   const raw=callback(1,'bridge_admin:retry:abc');assert.equal(classify(raw,[1],2),'user');
   raw.callback_query.from.id=1;raw.callback_query.message.chat.id=1;assert.equal(classify(raw,[1],2),'importer');
+});
+
+test('uncached bounded JPEG cover streams once and then reuses its native photo ID',async t=>{
+  const f=fixture(t);const x={...folder(),items:[{...item(),source_kind:'photo',name:'IMG_0001.JPG',file_size:3}]};await publish(f,[x]);
+  await f.webhook(callback(1,'open:'+x.id));await f.drain();
+  assert.ok(f.calls.some(x=>x.method==='sendPhoto' && x.body.multipart));
+  assert.equal(f.db.sql.prepare('SELECT photo_id FROM cover_cache').get().photo_id,'cached-cover-photo');
+  await f.webhook(callback(2,'open:'+x.id));await f.drain();
+  assert.equal(f.calls.filter(x=>x.method==='getFile').length,1);
+  assert.equal(f.calls.filter(x=>x.method==='sendPhoto').at(-1).body.photo,'cached-cover-photo');
 });

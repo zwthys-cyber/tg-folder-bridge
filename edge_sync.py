@@ -71,7 +71,7 @@ class EdgeClient:
                 if path == 'sync/publish' and code == 409:
                     if self.call('status').get('active') == payload['generation']:
                         return {'ok': True, 'recovered': True}
-                if code not in {429, 502, 503, 504} or attempt == attempts-1:
+                if code not in {429, 500, 502, 503, 504} or attempt == attempts-1:
                     raise RuntimeError(f'Edge {path} rejected: HTTP {code}') from None
             except (urllib.error.URLError, TimeoutError):
                 if attempt == attempts-1:
