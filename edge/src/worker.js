@@ -96,7 +96,7 @@ async function removePanel(e,uid,message,call){
   if(!panel)return;
   for(const id of [message,panel.stats].filter(Boolean)) {
     // Deletion may already have succeeded when Telegram redelivers an update.
-    try{await call('deleteMessage',{chat_id:uid,message_id:id});}catch(error){if(error instanceof Retry)throw error;}
+    try{await call('deleteMessage',{chat_id:uid,message_id:id});}catch(error){if(error instanceof Retry || error instanceof DeferInteraction)throw error;}
   }
   await run(e,'DELETE FROM panels WHERE chat=? AND message=?',uid,message);
 }

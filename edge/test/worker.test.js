@@ -206,3 +206,16 @@ test('uncached image work defers to UI consumer and keeps one card receipt',asyn
  await worker.queue({messages:broker.map(body=>({body,ack(){},retry(){throw Error('retry');}}))},f.env);
  assert.equal(f.calls.filter(x=>x.method==='sendPhoto').length,1);
 });
+
+test('yielding after card send preserves panel cleanup and never resends the card',async t=>{
+ const f=fixture(t),pending=[],broker=[];f.env.UI={async send(body){broker.push(body);}};
+ await publish(f,[{...folder(),cover:'native-photo'}]);f.db.sql.prepare('INSERT INTO panels VALUES(3,10,9)').run();
+ const originalFetch=globalThis.fetch,originalNow=Date.now;let offset=0;
+ Date.now=()=>originalNow()+offset;t.after(()=>{Date.now=originalNow;});
+ globalThis.fetch=async(url,init)=>{const result=await originalFetch(url,init);if(url.endsWith('/sendPhoto'))offset=6000;return result;};
+ const request=new Request('https://test/webhook',{method:'POST',headers:{'x-telegram-bot-api-secret-token':'secret'},body:JSON.stringify(callback(99,'open:'+folder().id))});
+ await worker.fetch(request,f.env,{waitUntil(promise){pending.push(promise);}});await Promise.all(pending);
+ assert.equal(broker.length,1);assert.equal(f.db.sql.prepare('SELECT count(*) n FROM panels').get().n,1);
+ await worker.queue({messages:broker.map(body=>({body,ack(){},retry(){throw Error('retry');}}))},f.env);
+ assert.equal(f.calls.filter(x=>x.method==='sendPhoto').length,1);assert.equal(f.db.sql.prepare('SELECT count(*) n FROM panels').get().n,0);
+});
