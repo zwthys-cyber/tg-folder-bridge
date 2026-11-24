@@ -903,12 +903,10 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
             row = self.store.get(job_id)
             refresh_source = job_id in self.source_refresh_requests
             self.source_refresh_requests.discard(job_id)
-            repair_ids = automation_control.read(self.controls_root()).get('repair_pass_jobs',[])
             job = dict(id=job_id, expected=row['expected'], chats=set(), baselines={},
                        events=asyncio.Queue(maxsize=5000), overflow=False,
                        refresh_source=refresh_source,
-                       repair_partial=isinstance(repair_ids,list) and job_id in repair_ids
-                           and bool(self.store.files(job_id)),
+                       repair_partial=bool(self.store.files(job_id)) and not row.get('audit_requested'),
                        dedup_audit=bool(row.get('audit_requested')))
             self.active = job
             self.store.update(job_id, 'running', job['expected'])

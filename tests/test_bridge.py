@@ -979,6 +979,25 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bridge.store.files('job'),[])
         self.assertEqual(self.job['phase'],'下载')
 
+    async def test_manual_resume_with_saved_files_uses_repair_preflight_without_batch_controls(self):
+        self.bridge.transfer_mode='download_upload'
+        self.bridge.store.add_file('job',(101,2),NS(chat_id=7,message_id=90),'saved','document')
+        self.bridge.store.update('job','queued',2)
+        observed=[]
+        async def collect(link,job):
+            observed.append(job['repair_partial']);job['download_limited']=1
+        self.bridge.collect=collect
+        self.bridge.app=NS(bot=NS(send_message=AsyncMock()))
+        self.bridge.jobs.put_nowait('job')
+        worker=asyncio.create_task(self.bridge.work())
+        try:
+            await asyncio.wait_for(self.bridge.jobs.join(),2)
+            self.assertEqual(observed,[True])
+            self.assertEqual(self.bridge.store.get('job')['state'],'needs_review')
+        finally:
+            worker.cancel()
+            with self.assertRaises(asyncio.CancelledError):await worker
+
     async def test_download_refreshes_only_identical_source_media_and_retries_once(self):
         from contextlib import asynccontextmanager
         from telethon.errors import FloodWaitError
