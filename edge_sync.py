@@ -5,6 +5,9 @@ import json
 import os
 import sqlite3
 import urllib.request
+import urllib.error
+import time
+from concurrent.futures import ThreadPoolExecutor
 import uuid
 from pathlib import Path
 from core import Store
@@ -53,20 +56,43 @@ class EdgeClient:
     def call(self, path, payload=None):
         data = json.dumps(payload, ensure_ascii=False).encode() if payload is not None else None
         request = urllib.request.Request(self.base + '/api/' + path, data=data,
-            headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': 'application/json', 'User-Agent': 'tg-folder-bridge/0.13.0'})
-        with urllib.request.urlopen(request, timeout=90) as response:
-            return json.load(response)
+            headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': 'application/json',
+                     'User-Agent': 'tg-folder-bridge/0.13.0'})
+        # Only staging/snapshot operations are replay-safe. Inbox leasing keeps
+        # its own durable semantics and is not blindly retried here.
+        attempts = 4 if path.startswith('sync/') else 1
+        for attempt in range(attempts):
+            try:
+                with urllib.request.urlopen(request, timeout=90) as response:
+                    return json.load(response)
+            except urllib.error.HTTPError as error:
+                code = error.code
+                error.close()
+                if path == 'sync/publish' and code == 409:
+                    if self.call('status').get('active') == payload['generation']:
+                        return {'ok': True, 'recovered': True}
+                if code not in {429, 502, 503, 504} or attempt == attempts-1:
+                    raise RuntimeError(f'Edge {path} rejected: HTTP {code}') from None
+            except (urllib.error.URLError, TimeoutError):
+                if attempt == attempts-1:
+                    raise RuntimeError(f'Edge {path} network unavailable') from None
+            time.sleep(2**attempt)
 
     def publish(self, data, bot_id, seed=False):
         generation = uuid.uuid4().hex
         self.call('sync/begin', dict(id=generation, bot_id=bot_id, count=len(data['folders'])))
-        for i, folder in enumerate(data['folders']):
-            self.call('sync/folder', dict(generation=generation, ordinal=i, folder=folder))
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for start in range(0, len(data['folders']), 4):
+                pending = [pool.submit(self.call, 'sync/folder',
+                    dict(generation=generation, ordinal=i, folder=data['folders'][i]))
+                    for i in range(start, min(start+4, len(data['folders']))) ]
+                for future in pending:
+                    future.result()
         if seed:
             for kind in ('favorites', 'subscribers'):
                 for start in range(0, len(data[kind]), 20):
                     self.call('sync/preferences', {'generation': generation, kind: data[kind][start:start+20]})
-        return self.call('sync/publish', dict(generation=generation))
+        return dict(self.call('sync/publish', dict(generation=generation)), generation=generation)
 
 
 def fingerprint(data):

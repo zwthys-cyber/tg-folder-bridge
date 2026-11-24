@@ -59,7 +59,7 @@ async def sync(client, database, bot_id):
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            print('Edge sync postponed: ' + type(error).__name__, flush=True)
+            print('Edge sync postponed: ' + (str(error) if isinstance(error, RuntimeError) else type(error).__name__), flush=True)
         await asyncio.sleep(3600)
 
 

@@ -147,3 +147,5 @@ npx wrangler d1 export sougabot-catalog --remote --output /私有目录/edge-d1.
 明文 D1 导出含 file_id 和用户 ID，必须加密后才可以放到备份位置。仓库新增 `Backup edge database` 工作流，可手动运行或每天 04:17 UTC 自动运行；需要 GitHub Secret `EDGE_BACKUP_KEY`，在 GitHub 导出、AES-256 加密并逐字节核对解密结果，仅上传加密 Artifact，保留 90 天。密钥必须另行私下保管；Artifact 不永久保留，应定期下载归档。仓库已有加密备份不是新 D1 的自动备份，不能把旧“最近备份”时间当成新服务已备份。
 
 回滚顺序：停止新 importer / 采集器 → `python edge_admin.py delete-webhook`（保留 pending）→ 私有导出 D1 偏好和状态 → 按 Telegram 迁移规则恢复原本地/云端 Bot API → 恢复原配置，确认只有一个旧消费者后再启动旧 sougabot。回滚代码不等于把 Cloudflare 上新增的收藏自动写回旧 SQLite，必须单独迁移这些用户数据。不要删除 D1 或旧库来排除重复。
+
+目录同步的 HTTP 元数据写入最多四路并行，与媒体上传/下载并发无关。暂存接口遇到短暂 429/502/503/504 或网络错误会有限退避重试；发布确认丢失时核对 active generation，避免已成功发布却被误判成未发布。管理回调仅向 OWNER_IDS 中的用户开放，旧 `bridge_admin` 按钮经 inbox 交给原权限检查处理。

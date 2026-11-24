@@ -151,3 +151,8 @@ test('repeated clicks on an old favorite button cannot accidentally unsubscribe'
   await f.webhook(callback(3,'unfav:'+folder().id));await f.drain();
   assert.equal(f.db.sql.prepare('SELECT count(*) n FROM favorites').get().n,0);
 });
+
+test('only owners may route legacy administrative callbacks to the importer',()=>{
+  const raw=callback(1,'bridge_admin:retry:abc');assert.equal(classify(raw,[1],2),'user');
+  raw.callback_query.from.id=1;raw.callback_query.message.chat.id=1;assert.equal(classify(raw,[1],2),'importer');
+});

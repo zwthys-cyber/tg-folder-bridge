@@ -38,7 +38,7 @@ export function validateFolder(f) {
 }
 export function classify(raw, owners, relay) {
   const m=raw.message, q=raw.callback_query;
-  if(q?.message?.chat?.type==='private' && q.from.id===q.message.chat.id) return 'user';
+  if(q?.message?.chat?.type==='private' && q.from.id===q.message.chat.id) return owners.includes(q.from.id) && /^bridge_admin:/.test(q.data||'')?'importer':'user';
   if(!m || m.chat?.type!=='private' || m.from?.id!==m.chat.id) return 'ignore';
   if(m.from.id===relay && ['document','photo','video','animation','audio','voice','video_note'].some(k=>m[k])) return 'importer';
   const text=m.text||'';

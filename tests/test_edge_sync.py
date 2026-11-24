@@ -60,3 +60,26 @@ class EdgeExportTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class EdgeTransportTests(unittest.TestCase):
+    def test_staging_retries_transient_rejection_without_exposing_token(self):
+        import io
+        import urllib.error
+        client = EdgeClient('https://example.com', 'private-test-token')
+        failure = urllib.error.HTTPError('https://example.com', 503, 'unavailable', {}, io.BytesIO())
+        with patch('urllib.request.urlopen', side_effect=[failure, io.BytesIO(b'{"ok":true}')]) as request, patch('edge_sync.time.sleep'):
+            self.assertEqual(client.call('sync/folder', {'generation': 'x'}), {'ok': True})
+            self.assertEqual(request.call_count, 2)
+        denied = urllib.error.HTTPError('https://example.com', 401, 'denied', {}, io.BytesIO())
+        with patch('urllib.request.urlopen', side_effect=denied), patch('edge_sync.time.sleep'):
+            with self.assertRaisesRegex(RuntimeError, 'HTTP 401') as error:
+                client.call('sync/begin', {})
+            self.assertNotIn('private-test-token', str(error.exception))
+
+    def test_lost_publication_ack_is_recognized_by_active_generation(self):
+        import io
+        import urllib.error
+        client = EdgeClient('https://example.com', 'private-test-token')
+        conflict = urllib.error.HTTPError('https://example.com', 409, 'already published', {}, io.BytesIO())
+        with patch('urllib.request.urlopen', side_effect=[conflict, io.BytesIO(b'{"active":"current"}')]):
+            self.assertTrue(client.call('sync/publish', {'generation': 'current'})['recovered'])
