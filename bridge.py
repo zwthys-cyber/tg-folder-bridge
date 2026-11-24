@@ -923,8 +923,9 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 detail = '' if complete else '发送已静默，无法确认全部文件已收到。'
                 if not complete and job.get('source_announced') and job.get('audit_total') == 0:
                     detail = '来源已回复开始发送，但等待并核对聊天历史后仍无媒体，已暂缓自动补收。'
-                if job.get('download_limited'):
-                    detail += f" {job['download_limited']} 个来源文件下载受限，已暂缓补收，继续后续文件夹。"
+                if not complete and job.get('download_limited'):
+                    detail = (f"{job['download_limited']} 个来源文件暂时无法完整下载；"
+                              f"已保存 {n}/{job['expected']}，缺件保留等待来源恢复，本轮继续后续文件夹。")
                 if job.get('preview_warnings'):
                     detail += ' 部分 HEIC 预览未生成，原文件已保留。'
                 if job.get('resume_lookup_warnings'):

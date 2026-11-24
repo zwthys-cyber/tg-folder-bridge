@@ -994,6 +994,8 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(self.bridge.jobs.join(),2)
             self.assertEqual(observed,[True])
             self.assertEqual(self.bridge.store.get('job')['state'],'needs_review')
+            self.assertIn('来源文件',self.bridge.store.get('job')['detail'])
+            self.assertNotIn('发送已静默',self.bridge.store.get('job')['detail'])
         finally:
             worker.cancel()
             with self.assertRaises(asyncio.CancelledError):await worker
