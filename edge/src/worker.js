@@ -9,6 +9,8 @@ const run=(e,sql,...args)=>stmt(e,sql,...args).run();
 const rows=async(e,sql,...args)=>(await stmt(e,sql,...args).all()).results;
 class Retry extends Error {constructor(seconds){super('Telegram retry');this.seconds=seconds;}}
 class Uncertain extends Error {}
+class DeferInteraction extends Error {}
+function interactionBudget(e){if(e.UI_DEADLINE && e.UI_DEADLINE-Date.now()<20000)throw new DeferInteraction();}
 // Keep secret comparison length-independent after hashing; never log tokens/updates.
 async function same(a,b) {
   if(!a||!b)return false;
@@ -28,6 +30,7 @@ async function telegram(e,method,body,upload) {
 // A successful operation is replayed from its receipt, never re-sent. A crashed
 // in-flight operation is uncertain: automatic recovery cannot duplicate media.
 async function send(e,id,method,body,upload) {
+  try{interactionBudget(e);}catch(error){if(upload?.body)await upload.body.cancel();throw error;}
   let old=await first(e,'SELECT * FROM sends WHERE id=?',id);
   if(old?.state==='sent')return JSON.parse(old.response);
   if(old?.state==='failed')throw Error(old.error);
@@ -47,9 +50,9 @@ async function signal(e,id,type,options){
   if(!type)type=(await first(e,'SELECT type FROM events WHERE id=?',id))?.type;
   await (type==='update' && e.UI?e.UI:e.WORK).send({id},options);
 }
-async function enqueue(e,id,type,owner,payload) {
+async function enqueue(e,id,type,owner,payload,notify=true) {
   await run(e,"INSERT OR IGNORE INTO events(id,type,owner,payload,touched,created_ms) VALUES(?,?,?,?,?,?)",id,type,owner,JSON.stringify(payload),now(),Date.now());
-  await signal(e,id,type);
+  if(notify)await signal(e,id,type);
 }
 async function active(e){return (await first(e,"SELECT value FROM config WHERE key='active'"))?.value;}
 async function folder(e,id,generation){const row=await first(e,'SELECT payload FROM folders WHERE generation=? AND id=?',generation||await active(e),id);return row?JSON.parse(row.payload):null;}
@@ -89,6 +92,7 @@ async function removePanel(e,uid,message,call){
 }
 async function open(e,uid,id,origin,call) {
   const f=await folder(e,id);if(!f){await call('sendMessage',{chat_id:uid,text:'文件夹尚未就绪或已移除。'});return;}
+  if(e.UI_DEADLINE && f.items.length>200)throw new DeferInteraction();
   const saved=await favorite(e,uid,id);
   const keys=keyboard([[button('查看内容',`view:${id}`)],[button(saved?'⭐ 已收藏':'☆ 收藏',`${saved?'unfav':'fav'}:${id}`),button('⭐ 我的收藏','favorites:1')],[button('文件夹列表','list:1')]]);
   const body={chat_id:uid,reply_markup:keys};
@@ -97,6 +101,7 @@ async function open(e,uid,id,origin,call) {
     const cached=await first(e,'SELECT photo_id FROM cover_cache WHERE job=? AND source_id=?',id,source.file_id);
     photo=cached?.photo_id;
     if(!photo){
+      if(e.UI_DEADLINE)throw new DeferInteraction();
       try{
         const file=await telegram(e,'getFile',{file_id:source.file_id});
         if(!file.file_path || file.file_size>COVER_LIMIT)throw Error('Cover unavailable');
@@ -108,7 +113,7 @@ async function open(e,uid,id,origin,call) {
   let card;
   if(photo || upload){
     try{card=await call('sendPhoto',{...body,photo,caption:details(f)},upload);}
-    catch(error){if(error instanceof Retry || error instanceof Uncertain)throw error;}
+    catch(error){if(error instanceof Retry || error instanceof Uncertain || error instanceof DeferInteraction)throw error;}
   }
   if(!card)card=await call('sendMessage',{...body,text:details(f)});
   if(source && card.photo?.length)await run(e,'INSERT OR REPLACE INTO cover_cache VALUES(?,?,?)',id,source.file_id,card.photo.at(-1).file_id);
@@ -118,7 +123,7 @@ async function open(e,uid,id,origin,call) {
 async function userUpdate(e,event) {
   const u=JSON.parse(event.payload),m=u.message,q=u.callback_query,uid=event.owner;
   let seq=0;const call=(method,body,upload)=>send(e,`${event.id}:${seq++}`,method,body,upload);
-  if(q){try{await telegram(e,'answerCallbackQuery',{callback_query_id:q.id});}catch{/* expired answers do not invalidate durable actions */}}
+  if(q){interactionBudget(e);try{await telegram(e,'answerCallbackQuery',{callback_query_id:q.id});}catch{/* expired answers do not invalidate durable actions */}}
   let text=(m?.text||'').trim();let action=q?.data||'';
   // Previously emitted bridge buttons remain usable after migration.
   action=action.replace(/^bridge_catalog:/,'list:').replace(/^bridge_favorites:/,'favorites:').replace(/^bridge_open:/,'open:').replace(/^bridge_view:/,'view:').replace(/^bridge_fav:/,'fav:').replace(/^bridge_unfav:/,'unfav:').replace(/^bridge_notice:/,'notice:');
@@ -208,14 +213,16 @@ async function delivery(e,event){
   if(plan.cursor<groups.length+2){await run(e,"UPDATE events SET state='pending',next_at=?,touched=? WHERE id=?",now()+2,now(),event.id);await e.WORK.send({id:event.id},{delaySeconds:2});return false;}
   return true;
 }
-async function process(e,id){
+async function process(e,id,interactive=false){
   const claim=await run(e,"UPDATE events SET state='processing',touched=?,started_ms=CASE WHEN started_ms=0 THEN ? ELSE started_ms END WHERE id=? AND state='pending' AND next_at<=?",now(),Date.now(),id,now());
   if(!claim.meta.changes)return;
   const event=await first(e,'SELECT * FROM events WHERE id=?',id);
   try{
-    const done=event.type==='delivery'?await delivery(e,event):event.type==='notice'?await notice(e,event):await userUpdate(e,event);
+    const interactiveEnv=interactive?{...e,UI_DEADLINE:Date.now()+25000}:e;
+    const done=event.type==='delivery'?await delivery(e,event):event.type==='notice'?await notice(e,event):await userUpdate(interactiveEnv,event);
     if(done!==false)await run(e,"UPDATE events SET state='complete',touched=?,finished_ms=? WHERE id=?",now(),Date.now(),id);
   }catch(error){
+    if(error instanceof DeferInteraction){await run(e,"UPDATE events SET state='pending',next_at=0,touched=? WHERE id=?",now(),id);await signal(e,id,event.type);return;}
     const retry=error instanceof Retry;
     await run(e,'UPDATE events SET state=?,next_at=?,error=?,touched=? WHERE id=?',retry?'pending':error instanceof Uncertain?'uncertain':'failed',retry?now()+error.seconds:0,String(error.message).slice(0,200),now(),id);
     if(retry)await signal(e,id,event.type,{delaySeconds:Math.min(error.seconds,43200)});
@@ -276,7 +283,7 @@ async function api(request,e,path){
   return json({error:'Not found'},404);
 }
 export default {
-  async fetch(request,e){
+  async fetch(request,e,ctx){
     const path=new URL(request.url).pathname;
     try{
       if(path==='/health')return json({ok:true,service:'sougabot-edge'});
@@ -290,7 +297,11 @@ export default {
         await run(e,'INSERT OR IGNORE INTO importer_inbox(id,payload,expires) VALUES(?,?,?)',update.update_id,raw,now()+86400*7);
       }else if(type==='user'){
         const uid=update.message?.from.id||update.callback_query.from.id;
-        await enqueue(e,`update:${update.update_id}`,'update',uid,update);
+        const id=`update:${update.update_id}`;
+        if(ctx?.waitUntil){
+          await enqueue(e,id,'update',uid,update,false);
+          ctx.waitUntil(process(e,id,true).catch(()=>signal(e,id,'update')));
+        }else await enqueue(e,id,'update',uid,update);
       }
       return json({ok:true});
     }catch{return json({error:'Request could not be processed'},503);}

@@ -188,3 +188,21 @@ test('parallel UI consumers cannot start two active folders for one user',async 
  sql.prepare("UPDATE events SET state='complete' WHERE id='one'").run();
  sql.prepare("INSERT INTO events(id,type,owner,payload,state,touched) VALUES('two','delivery',3,'{}','pending',0)").run();
 });
+
+test('short interactions start after persistence without waiting for broker dispatch',async t=>{
+ const f=fixture(t),background=[],broker=[];f.env.UI={async send(body){broker.push(body);}};await publish(f);
+ const request=new Request('https://test/webhook',{method:'POST',headers:{'x-telegram-bot-api-secret-token':'secret'},body:JSON.stringify(update(99,'/start'))});
+ const response=await worker.fetch(request,f.env,{waitUntil(promise){background.push(promise);}});
+ assert.equal(response.status,200);assert.equal(background.length,1);await Promise.all(background);
+ assert.equal(broker.length,0);assert.equal(f.db.sql.prepare("SELECT state FROM events WHERE id='update:99'").get().state,'complete');
+ assert.equal(f.calls.filter(x=>x.method==='sendMessage').length,2);
+});
+test('uncached image work defers to UI consumer and keeps one card receipt',async t=>{
+ const f=fixture(t),background=[],broker=[];f.env.UI={async send(body){broker.push(body);}};
+ const x={...folder(),items:[{...item(),source_kind:'photo',name:'a.JPG',file_size:3}]};await publish(f,[x]);
+ const request=new Request('https://test/webhook',{method:'POST',headers:{'x-telegram-bot-api-secret-token':'secret'},body:JSON.stringify(callback(99,'open:'+x.id))});
+ await worker.fetch(request,f.env,{waitUntil(promise){background.push(promise);}});await Promise.all(background);
+ assert.equal(broker.length,1);assert.equal(f.calls.filter(x=>x.method==='sendPhoto').length,0);
+ await worker.queue({messages:broker.map(body=>({body,ack(){},retry(){throw Error('retry');}}))},f.env);
+ assert.equal(f.calls.filter(x=>x.method==='sendPhoto').length,1);
+});
