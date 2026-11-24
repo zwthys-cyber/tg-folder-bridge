@@ -53,7 +53,7 @@ class EdgeClient:
     def call(self, path, payload=None):
         data = json.dumps(payload, ensure_ascii=False).encode() if payload is not None else None
         request = urllib.request.Request(self.base + '/api/' + path, data=data,
-            headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': 'application/json'})
+            headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': 'application/json', 'User-Agent': 'tg-folder-bridge/0.13.0'})
         with urllib.request.urlopen(request, timeout=90) as response:
             return json.load(response)
 
