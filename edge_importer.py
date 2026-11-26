@@ -51,21 +51,23 @@ async def inbox(client, app):
             await asyncio.sleep(2)
 
 
-async def sync(client, database, bot_id):
+async def sync(client, database, bot_id, *, poll_interval=60, publish_interval=300, clock=time.monotonic):
     last = ''
+    published_at = None
     while True:
         try:
             data = await asyncio.to_thread(snapshot, database)
             current = fingerprint(data)
-            if current != last:
+            if current != last and (published_at is None or clock()-published_at >= publish_interval):
                 await asyncio.to_thread(client.publish, data, bot_id)
                 last = current
+                published_at = clock()
                 print(f"Edge catalog synced: {len(data['folders'])} folders", flush=True)
         except asyncio.CancelledError:
             raise
         except Exception as error:
             print('Edge sync postponed: ' + (str(error) if isinstance(error, RuntimeError) else type(error).__name__), flush=True)
-        await asyncio.sleep(3600)
+        await asyncio.sleep(poll_interval)
 
 
 async def serve():
