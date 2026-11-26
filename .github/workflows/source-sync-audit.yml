@@ -1,0 +1,45 @@
+name: Inspect source sync remotely
+on:
+  push:
+    paths:
+      - '.github/workflows/source-sync-audit.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    environment: cloudflare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      EDGE_DATABASE_ID: ${{ vars.EDGE_DATABASE_ID }}
+    steps:
+      - name: Read cloud heartbeat and published catalog only
+        run: |
+          python3 - <<'PY'
+          import json,os,time,urllib.request
+          account=os.environ['CLOUDFLARE_ACCOUNT_ID']
+          database=os.environ['EDGE_DATABASE_ID']
+          request=urllib.request.Request(
+              'https://api.cloudflare.com/client/v4/accounts/'+account+'/d1/database/'+database+'/query',
+              data=json.dumps({'sql':"""SELECT 'heartbeat' AS kind,value AS data FROM config WHERE key='importer_heartbeat'
+              UNION ALL SELECT 'statistics',value FROM config WHERE key='stats'
+              UNION ALL SELECT 'folder',title FROM folders WHERE generation=(SELECT value FROM config WHERE key='active') ORDER BY kind LIMIT 25"""}).encode(),
+              headers={'Authorization':'Bearer '+os.environ['CLOUDFLARE_API_TOKEN'],'Content-Type':'application/json','User-Agent':'tg-folder-bridge-remote-audit/1.0'})
+          with urllib.request.urlopen(request,timeout=45) as response:
+              result=json.load(response)
+          if not result.get('success'):raise SystemExit('Cloud audit API rejected the query')
+          for entry in result['result'][0]['results']:
+              if entry['kind']=='heartbeat':
+                  print('Importer last heartbeat age (seconds):',max(0,int(time.time()-float(entry['data']))))
+              elif entry['kind']=='statistics':
+                  print('Published statistics:',entry['data'])
+          # Explicit title ordering; never export file IDs, users or credentials.
+          request.data=json.dumps({'sql':"SELECT title,json_array_length(payload,'$.items') AS files FROM folders WHERE generation=(SELECT value FROM config WHERE key='active') ORDER BY rank DESC,ordinal LIMIT 12"}).encode()
+          with urllib.request.urlopen(request,timeout=45) as response:
+              result=json.load(response)
+          if not result.get('success'):raise SystemExit('Catalog audit query failed')
+          print('Newest published folders:',json.dumps(result['result'][0]['results'],ensure_ascii=False))
+          PY
