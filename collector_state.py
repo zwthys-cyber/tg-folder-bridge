@@ -62,9 +62,10 @@ class Ledger:
         with self.db:
             suffix = re.search(r'(\d+)\s*$', title)
             priority = int(suffix[1]) if suffix else 0
-            self.db.execute('INSERT OR IGNORE INTO items(source,item_key,title,link,priority) VALUES(?,?,?,?,?)',
-                            (source, key, title, link, priority))
+            added = self.db.execute('INSERT OR IGNORE INTO items(source,item_key,title,link,priority) VALUES(?,?,?,?,?)',
+                            (source, key, title, link, priority)).rowcount > 0
             self.db.execute('INSERT OR IGNORE INTO discoveries VALUES(?,?)', (source, key))
+            return added
 
     def seen(self, source, key):
         return self.db.execute('SELECT 1 FROM discoveries WHERE source=? AND item_key=?', (source, key)).fetchone() is not None
@@ -104,12 +105,41 @@ class Ledger:
         row = self.db.execute("SELECT * FROM items WHERE state='ready' ORDER BY priority DESC,rowid LIMIT 1").fetchone()
         return dict(row) if row else None
 
+    def begin_head(self, source):
+        with self.db:
+            key = 'head-base:' + source
+            if not self.db.execute('SELECT 1 FROM settings WHERE key=?', (key,)).fetchone():
+                baseline = self.db.execute('SELECT coalesce(max(rowid),0) FROM items').fetchone()[0]
+                self.db.execute('INSERT INTO settings VALUES(?,?)', (key, baseline))
+                self.head_checkpoint(source, 1, 0)
+
+    def known_before_head(self, source, link):
+        base = self.db.execute('SELECT value FROM settings WHERE key=?', ('head-base:' + source,)).fetchone()
+        if base is None:
+            raise RuntimeError('Head scan has not been initialized')
+        row = self.db.execute('SELECT rowid FROM items WHERE link=?', (link,)).fetchone()
+        return bool(row and row[0] <= base[0])
+
+    def head_position(self, source):
+        page = self.db.execute('SELECT value FROM settings WHERE key=?', ('head-page:' + source,)).fetchone()
+        clean = self.db.execute('SELECT value FROM settings WHERE key=?', ('head-clean:' + source,)).fetchone()
+        return (int(page[0]) if page else 1, int(clean[0]) if clean else 0)
+
+    def head_checkpoint(self, source, page, clean):
+        with self.db:
+            self.db.executemany('INSERT OR REPLACE INTO settings VALUES(?,?)',
+                [('head-page:' + source, page), ('head-clean:' + source, clean)])
+
     def head_due(self, source, interval=600):
+        if self.db.execute('SELECT 1 FROM settings WHERE key=?', ('head-base:' + source,)).fetchone():
+            return True
         row = self.db.execute('SELECT value FROM settings WHERE key=?', ('head:' + source,)).fetchone()
         return not row or time.time() - row[0] >= interval
 
     def checked_head(self, source):
         with self.db:
+            self.db.executemany('DELETE FROM settings WHERE key=?',
+                [('head-base:' + source,), ('head-page:' + source,), ('head-clean:' + source,)])
             self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)', ('head:' + source, time.time()))
 
     def summary(self):

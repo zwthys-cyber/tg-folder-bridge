@@ -239,3 +239,73 @@ class MenuTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(MenuChangedError):
                 await catalog.jump_page(panel,b'jump',1)
         catalog.click.assert_awaited_once()
+
+
+class IncrementalHeadTests(unittest.IsolatedAsyncioTestCase):
+    def catalog(self, pages):
+        listings = {}
+        for page in pages:
+            listings[page] = NS(id=page, page=page,
+                raw_text=f'共 40 个文件夹（第 {page}/4 页）',
+                buttons=[[NS(text='1', data=f'folder_preview_list/1/{page}/list'.encode())]])
+        catalog = Catalog(None, 'source', {'epan'})
+        catalog.page = AsyncMock(side_effect=lambda wanted: listings[wanted])
+        async def click(message, data, predicate):
+            if data == b'back':
+                return listings[message.page]
+            title, token = pages[message.page]
+            return NS(id=message.page, page=message.page,
+                raw_text=f'📁 {title}\n分享链接：https://t.me/epan?start={token}',
+                entities=[], buttons=[[NS(text='文件夹列表', data=b'back')]])
+        catalog.click = AsyncMock(side_effect=click)
+        return catalog
+
+    def seeded(self, path):
+        ledger = Ledger(path)
+        for i in (1, 2):
+            link=f'https://t.me/epan?start=Old{i}'
+            ledger.add('source', f'legacy-position-{i}', f'旧目录{i}', link)
+            row=ledger.db.execute('SELECT * FROM items WHERE link=?',(link,)).fetchone()
+            ledger.set_state(row, 'complete' if i==1 else 'ignored', f'old-job-{i}')
+        ledger.advance('source', 107, 107)
+        return ledger
+
+    async def test_reused_number_callback_does_not_hide_new_share(self):
+        ledger=self.seeded(':memory:')
+        old_key=b'folder_preview_list/1/1/list'.hex()
+        ledger.db.execute('INSERT INTO discoveries VALUES(?,?)',('source',old_key))
+        ledger.db.commit()
+        catalog=self.catalog({1:('新目录1064','NewA'),2:('新目录1065','NewB'),
+                              3:('旧目录1','Old1'),4:('旧目录2','Old2')})
+        self.assertFalse(await catalog.scan_head(ledger,max_pages=1))
+        self.assertEqual(ledger.next()['link'],'https://t.me/epan?start=NewA')
+        self.assertEqual(ledger.page('source'),(107,107,1))
+        self.assertEqual(ledger.head_position('source'),(2,0))
+        ledger.db.close()
+
+    async def test_new_folders_beyond_first_page_resume_and_keep_stopped_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'collector.sqlite3'
+            ledger=self.seeded(path)
+            catalog=self.catalog({1:('新目录1064','NewA'),2:('新目录1065','NewB'),
+                                  3:('旧目录1','Old1'),4:('旧目录2','Old2')})
+            self.assertFalse(await catalog.scan_head(ledger,max_pages=2))
+            ledger.db.close();ledger=Ledger(path)
+            self.assertEqual(ledger.head_position('source'),(3,0))
+            self.assertTrue(await catalog.scan_head(ledger,max_pages=2))
+            self.assertFalse(ledger.head_due('source'))
+            self.assertEqual(ledger.summary(),{'complete':1,'ignored':1,'ready':2})
+            self.assertEqual(ledger.page('source'),(107,107,1))
+            ledger.db.close()
+
+    async def test_restart_mid_page_does_not_treat_new_links_as_old_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'collector.sqlite3';ledger=self.seeded(path)
+            catalog=self.catalog({1:('新目录1064','NewA'),2:('新目录1065','NewB'),
+                                  3:('旧目录1','Old1'),4:('旧目录2','Old2')})
+            await catalog.scan_page(ledger,head=True,head_page=1)
+            ledger.db.close();ledger=Ledger(path)
+            self.assertFalse(await catalog.scan_head(ledger,max_pages=2))
+            self.assertEqual(ledger.head_position('source'),(3,0))
+            self.assertEqual(ledger.summary(),{'complete':1,'ignored':1,'ready':2})
+            ledger.db.close()
