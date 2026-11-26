@@ -25,8 +25,7 @@ jobs:
           request=urllib.request.Request(
               'https://api.cloudflare.com/client/v4/accounts/'+account+'/d1/database/'+database+'/query',
               data=json.dumps({'sql':"""SELECT 'heartbeat' AS kind,value AS data FROM config WHERE key='importer_heartbeat'
-              UNION ALL SELECT 'statistics',value FROM config WHERE key='stats'
-              UNION ALL SELECT 'folder',title FROM folders WHERE generation=(SELECT value FROM config WHERE key='active') ORDER BY kind LIMIT 25"""}).encode(),
+              UNION ALL SELECT 'statistics',value FROM config WHERE key='stats'"""}).encode(),
               headers={'Authorization':'Bearer '+os.environ['CLOUDFLARE_API_TOKEN'],'Content-Type':'application/json','User-Agent':'tg-folder-bridge-remote-audit/1.0'})
           with urllib.request.urlopen(request,timeout=45) as response:
               result=json.load(response)
