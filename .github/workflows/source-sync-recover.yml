@@ -1,0 +1,44 @@
+name: Recover source collector remotely
+on:
+  push:
+    paths:
+      - '.github/workflows/source-sync-recover.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: source-runtime-recovery
+  cancel-in-progress: false
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: '3.13'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Test on GitHub only
+        run: |
+          python -m compileall -q collector_state.py source_catalog.py collect_links.py deploy/recover_collector.py
+          python -m unittest discover -s tests -p test_collector.py -v
+  recover:
+    needs: check
+    environment: cloudflare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.CODESPACES_TOKEN }}
+      RUNTIME_NAME: sougabot-runtime-q7j9q4w7wq64h46q5
+    steps:
+      - name: Require a Codespaces-scoped credential
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::Set repository Secret CODESPACES_TOKEN with a GitHub token carrying the codespace scope. No runtime commands were executed."
+            exit 1
+          fi
+      - name: Apply update in the existing Codespace without builds or tests
+        run: |
+          gh codespace ssh -c "$RUNTIME_NAME" -- 'cd /workspaces/tg-folder-bridge && git diff --quiet && git diff --cached --quiet && git pull --ff-only && .venv/bin/python deploy/recover_collector.py'
