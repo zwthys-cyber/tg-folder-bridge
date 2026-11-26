@@ -1,0 +1,36 @@
+name: Publish completed catalog remotely
+on:
+  push:
+    paths: ['.github/workflows/source-catalog-publish.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: manual-catalog-publish
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    environment: cloudflare
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.CODESPACES_TOKEN }}
+      RUNTIME_NAME: sougabot-runtime-q7j9q4w7wq64h46q5
+    steps:
+      - name: Publish metadata without retransferring media
+        run: |
+          gh codespace ssh -c "$RUNTIME_NAME" -- 'cd /workspaces/tg-folder-bridge && .venv/bin/python -' <<'PY'
+          import json
+          from pathlib import Path
+          from edge_sync import EdgeClient, snapshot
+          root=Path('/workspaces/.tg-runtime')
+          settings=json.loads((root/'edge-secrets.json').read_text())
+          data=snapshot(root/'bridge/data/index.sqlite3')
+          target=[f for f in data['folders'] if f['title']=='反差女主1064']
+          if not target:
+              raise SystemExit('Expected completed folder is missing from local public catalog')
+          print('Publishing folder count:',len(data['folders']),flush=True)
+          client=EdgeClient(settings['EDGE_URL'],settings['EDGE_SYNC_TOKEN'])
+          client.publish(data,9175312887)
+          print('Published target:',target[0]['title'],'files:',len(target[0]['items']),flush=True)
+          PY
