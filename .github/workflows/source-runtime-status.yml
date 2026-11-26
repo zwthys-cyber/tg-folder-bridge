@@ -1,0 +1,43 @@
+name: Inspect collector runtime remotely
+on:
+  push:
+    paths: ['.github/workflows/source-runtime-status.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    environment: cloudflare
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.CODESPACES_TOKEN }}
+      RUNTIME_NAME: sougabot-runtime-q7j9q4w7wq64h46q5
+    steps:
+      - name: Read business state only
+        run: |
+          gh codespace ssh -c "$RUNTIME_NAME" -- 'cd /workspaces/tg-folder-bridge && .venv/bin/python -' <<'PY'
+          import json, sqlite3, subprocess, time
+          from pathlib import Path
+          root=Path('/workspaces/.tg-runtime/bridge/data')
+          config=root.parents[1]/'supervisord.conf'
+          print(subprocess.run(['.venv/bin/supervisorctl','-c',str(config),'status','souga','collector'],capture_output=True,text=True).stdout)
+          for filename in ['index.sqlite3','collector.sqlite3']:
+              db=sqlite3.connect((root/filename).as_uri()+'?mode=ro',uri=True)
+              if filename=='index.sqlite3':
+                  print('jobs',db.execute('SELECT state,count(*) FROM jobs GROUP BY state').fetchall())
+                  print('latest_jobs',db.execute('SELECT title,state FROM jobs ORDER BY rowid DESC LIMIT 5').fetchall())
+              else:
+                  print('links',db.execute('SELECT state,count(*) FROM items GROUP BY state').fetchall())
+                  print('cursor',db.execute('SELECT * FROM cursor').fetchall())
+                  print('head',db.execute("SELECT key,value FROM settings WHERE key LIKE 'head%'").fetchall())
+                  print('newest_links',db.execute('SELECT title,state FROM items ORDER BY rowid DESC LIMIT 6').fetchall())
+              db.close()
+          state=root/'automation.json'
+          if state.exists():
+              flags=json.loads(state.read_text())
+              print('pause_flags',{k:flags.get(k,False) for k in ['collector_paused','transfers_paused']})
+          heartbeat=root/'collector-heartbeat.json'
+          if heartbeat.exists():
+              print('heartbeat_age_seconds',round(time.time()-json.loads(heartbeat.read_text())['at']))
+          PY
