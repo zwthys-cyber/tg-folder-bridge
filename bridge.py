@@ -649,7 +649,11 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
         if update.effective_chat.type != 'private' or update.effective_user.id not in self.owners:
             raise ApplicationHandlerStop
         job = self.store.get(context.args[0]) if context.args else None
+        refresh = (len(context.args) == 3 and context.args[1] == 'refresh'
+                   and re.fullmatch(r'[1-9][0-9]{0,3}', context.args[2]))
         if not job or job['owner'] != update.effective_user.id:
+            await update.message.reply_text('用法：/resume 原任务编号')
+        elif len(context.args) != 1 and not refresh:
             await update.message.reply_text('用法：/resume 原任务编号')
         elif self.store.unknown_local_send(job['id']):
             await update.message.reply_text('上次本地上传结果未知。先检查聊天，确认未收到后发送：\n/resolve '+job['id']+' retry')
@@ -660,6 +664,13 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
             await update.message.reply_text('服务暂不能接收续传任务；收件未确认时请先重启。')
         elif job['state'] in {'queued', 'running', 'cooldown'}:
             await update.message.reply_text('此任务正在排队、运行或冷却，无需重复续传，请用 /status 查看。')
+        elif refresh:
+            expected = int(context.args[2])
+            if expected <= 5000 and self.store.queue_source_refresh(job['id'], expected):
+                self.jobs.put_nowait(job['id'])
+                await update.message.reply_text(f"已排队同步新增媒体：{job['id']}\n/status {job['id']}")
+            else:
+                await update.message.reply_text('更新媒体数无效，或任务当前无法执行增量同步。')
         else:
             self.store.update(job['id'], 'queued', job['expected'])
             self.jobs.put_nowait(job['id'])
@@ -885,11 +896,13 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 if attempt == 2:
                     raise exc
                 job_id, expected = job['id'], job['expected']
+                minimum_expected = job.get('minimum_expected', 0)
                 refresh_source = (job.get('refresh_source') or
                                   (job.get('phase') == '下载' and type(exc).__name__ in
                                    {'FloodWaitError', 'FloodPremiumWaitError'}))
                 job.clear()
-                job.update(refresh_source=refresh_source, id=job_id, expected=expected, chats=set(), baselines={},
+                job.update(refresh_source=refresh_source, minimum_expected=minimum_expected,
+                           id=job_id, expected=expected, chats=set(), baselines={},
                            events=asyncio.Queue(maxsize=5000), overflow=False,
                            dedup_audit=bool(self.store.get(job_id).get('audit_requested')))
 
@@ -903,11 +916,12 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 self.jobs.task_done()
                 continue
             row = self.store.get(job_id)
-            refresh_source = job_id in self.source_refresh_requests
+            minimum_expected = row.get('refresh_expected', 0)
+            refresh_source = bool(minimum_expected) or job_id in self.source_refresh_requests
             self.source_refresh_requests.discard(job_id)
             job = dict(id=job_id, expected=row['expected'], chats=set(), baselines={},
                        events=asyncio.Queue(maxsize=5000), overflow=False,
-                       refresh_source=refresh_source,
+                       refresh_source=refresh_source, minimum_expected=minimum_expected,
                        repair_partial=bool(self.store.files(job_id)) and not row.get('audit_requested'),
                        dedup_audit=bool(row.get('audit_requested')))
             self.active = job
@@ -1314,6 +1328,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
         clicked = set()
         seen = set()
         actions = 0
+        minimum_expected = job.get('minimum_expected', 0)
         remaining = {(x['source_chat'], x['source_message']): x for x in self.store.resume_entries(job['id'])}
         # Older versions did not store a stable media ID. Recover it from the
         # old source messages; never identify duplicates by filename alone.
@@ -1417,7 +1432,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
         extended_wait = False
         history_checked = False
         menu_used = False
-        if not cached and self.store.get(job['id']).get('title'):
+        if not cached and not minimum_expected and self.store.get(job['id']).get('title'):
             try:
                 menu_used = await asyncio.wait_for(open_menu_content(
                     self.client, self.store, job, link, self.allowed,
@@ -1471,7 +1486,7 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                 job['source_announced'] = True
             if not job.get('expected_refreshed'):
                 expected = media_count(message.raw_text or '')
-                if expected is not None:
+                if expected is not None and expected >= minimum_expected:
                     job['expected'] = expected
                     job['expected_refreshed'] = True
                     self.store.update(job['id'], 'running', expected)
@@ -1490,8 +1505,12 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                     self.store.update(job['id'],'running',job['expected'],
                         f"正在收集来源清单：{len(plan)} / {job['expected'] if job['expected'] is not None else '未知'} 个媒体。")
             await handle_buttons(message)
-            if job['expected'] is not None and len(plan) >= job['expected'] and not job.get('pending_group_clicks'):
+            if (job['expected'] is not None and len(plan) >= job['expected'] and not job.get('pending_group_clicks')
+                    and (not minimum_expected or job.get('expected_refreshed'))):
                 break
+        if minimum_expected and (not job.get('expected_refreshed') or
+                                 (job['expected'] or 0) < minimum_expected or len(plan) != job['expected']):
+            raise RuntimeError('来源未确认更新后的媒体清单，保留已转存文件。')
         entries = [source_entry(m, i) for i, m in enumerate(plan, 1)]
         self.store.set_source_entries(job['id'], entries)
         if job['expected'] is not None and len(plan)==job['expected']:
@@ -1553,7 +1572,8 @@ class Bridge(Operations, BrowseNavigation, WholeDelivery, Notifications):
                                     self.store.merge_alias(job['id'], previous_key, other, previous.get('media_key', ''))
                         continue
                     ext = getattr(getattr(message, 'file', None), 'ext', '') or ''
-                    if self.transfer_mode == 'download_upload' and self.heic_previews and ext.lower() in {'.heic', '.heif'}:
+                    if (not minimum_expected and self.transfer_mode == 'download_upload'
+                            and self.heic_previews and ext.lower() in {'.heic', '.heif'}):
                         if self.document_groups and not previous.get('has_thumbnail'):
                             await self.transfer_media(message, previous_key, job, replace_original=True)
                         elif not self.document_groups and not previous.get('preview_file_id'):

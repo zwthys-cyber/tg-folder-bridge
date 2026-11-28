@@ -69,8 +69,37 @@ class StateTests(unittest.TestCase):
         self.assertEqual(ledger.page('source'), (106, 106, 1))
         ledger.db.close()
 
+    def test_completed_share_needs_a_larger_observed_count_and_a_new_ack(self):
+        ledger = Ledger(':memory:')
+        self.addCleanup(ledger.db.close)
+        link = 'https://t.me/epan?start=Token'
+        job = {'id': 'job', 'state': 'complete', 'expected': 2}
+        ledger.add('source', 'old', 'folder', link, 2)
+        ledger.reconcile({link: job})
+        self.assertIsNone(ledger.refresh_target(ledger.pending()[0], job))
+        ledger.add('source', 'new-position', 'folder', link, 3)
+        item, = ledger.pending()
+        self.assertEqual(ledger.refresh_target(item, job), 3)
+        ledger.set_state(item, 'dispatching', 'job', attempt=True, refresh_count=3)
+        ledger.reconcile({link: job})
+        self.assertEqual(ledger.summary(), {'dispatching': 1})
+        ledger.reconcile({link: dict(job, state='running', expected=3, refresh_expected=3)})
+        self.assertEqual(ledger.summary(), {'submitted': 1})
+        ledger.reconcile({link: dict(job, expected=3)})
+        self.assertEqual(ledger.summary(), {'complete': 1})
+        self.assertEqual(ledger.pending(), [])
+
 
 class MenuTests(unittest.IsolatedAsyncioTestCase):
+    async def test_collector_reopens_menu_after_media_pushes_it_out_of_history(self):
+        old = NS(id=9, raw_text='文件夹列表', buttons=[[NS(text='文件夹列表', data=b'list')]])
+        fresh = NS(id=11, raw_text='文件夹列表', buttons=old.buttons)
+        client = NS(send_message=AsyncMock(return_value=NS(id=10)),
+                    get_messages=AsyncMock(side_effect=[[], [old, fresh]]))
+        catalog = Catalog(client, 'source', {'epan'})
+        self.assertIs(await catalog.find_panel(), fresh)
+        client.send_message.assert_awaited_once_with('source', '/start')
+
     async def test_cancelled_partial_keeps_saved_file_and_never_dispatches_after_restart(self):
         from collect_links import dispatch
         with tempfile.TemporaryDirectory() as tmp:
@@ -297,6 +326,19 @@ class IncrementalHeadTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ledger.summary(),{'complete':1,'ignored':1,'ready':2})
             self.assertEqual(ledger.page('source'),(107,107,1))
             ledger.db.close()
+
+    async def test_finished_catalog_rotates_through_older_pages(self):
+        ledger = self.seeded(':memory:')
+        self.addCleanup(ledger.db.close)
+        catalog = self.catalog({1: ('旧目录1', 'Old1'), 2: ('旧目录2', 'Old2'),
+                                3: ('更早的目录', 'Earlier'), 4: ('旧目录1', 'Old1')})
+        self.assertTrue(await catalog.scan_head(ledger))
+        await catalog.revisit(ledger)
+        self.assertEqual(ledger.next()['link'], 'https://t.me/epan?start=Earlier')
+        self.assertEqual(ledger.revisit_page('source', 4), 4)
+        await catalog.revisit(ledger)
+        self.assertEqual(ledger.revisit_page('source', 4), 3)
+        self.assertEqual(ledger.page('source'), (107, 107, 1))
 
     async def test_restart_mid_page_does_not_treat_new_links_as_old_boundary(self):
         with tempfile.TemporaryDirectory() as directory:

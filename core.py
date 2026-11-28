@@ -205,7 +205,7 @@ class Store:
             self.db.execute("ALTER TABLE jobs ADD COLUMN title TEXT DEFAULT ''")
         if 'restart_pending' not in job_columns:
             self.db.execute('ALTER TABLE jobs ADD COLUMN restart_pending INTEGER DEFAULT 0')
-        for column in ('audit_requested', 'audit_public'):
+        for column in ('audit_requested', 'audit_public', 'refresh_expected'):
             if column not in job_columns:
                 self.db.execute(f'ALTER TABLE jobs ADD COLUMN {column} INTEGER DEFAULT 0')
         for column in ('source_created_at', 'source_updated_at', 'cover_file_id', 'partial_notice'):
@@ -278,9 +278,17 @@ class Store:
     def update(self, job, state, expected=None, detail=''):
         self.db.execute("UPDATE jobs SET state=?,expected=?,detail=?,partial_notice=CASE WHEN ?='complete' THEN '' ELSE partial_notice END,restart_pending=CASE "
                         "WHEN ? IN ('queued','running','cooldown') THEN 1 "
-                        "WHEN ?='interrupted' THEN restart_pending ELSE 0 END WHERE id=?",
-                        (state, expected, detail, state, state, state, job))
+                        "WHEN ?='interrupted' THEN restart_pending ELSE 0 END, "
+                        "refresh_expected=CASE WHEN ? IN ('complete','cancelled') THEN 0 ELSE refresh_expected END WHERE id=?",
+                        (state, expected, detail, state, state, state, state, job))
         self.db.commit()
+
+    def queue_source_refresh(self, job, expected):
+        with self.db:
+            result = self.db.execute("UPDATE jobs SET state='queued', expected=?, refresh_expected=?, "
+                "audit_public=1, restart_pending=1, detail='' WHERE id=? AND state='complete' "
+                "AND expected>0 AND expected<? AND audit_requested=0", (expected, expected, job, expected))
+            return result.rowcount == 1
 
     def get(self, job):
         row = self.db.execute('SELECT * FROM jobs WHERE id=?', (job,)).fetchone()

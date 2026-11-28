@@ -917,6 +917,35 @@ class CloudTransfer(unittest.IsolatedAsyncioTestCase):
             await self.bridge.resume(update, NS(args=['job']))
         self.assertTrue(self.bridge.jobs.empty())
 
+    async def test_source_growth_queues_same_public_job_with_durable_target(self):
+        store = self.bridge.store
+        store.add_file('job', (101, 1), NS(chat_id=7, message_id=12), 'saved', 'document')
+        store.update('job', 'complete', 1)
+        update = NS(effective_chat=NS(type='private'), effective_user=NS(id=7),
+                    message=NS(reply_text=AsyncMock()))
+        with self.assertRaises(ApplicationHandlerStop):
+            await self.bridge.resume(update, NS(args=['job', 'refresh', '2']))
+        self.assertEqual(self.bridge.jobs.get_nowait(), 'job')
+        self.assertEqual(store.get('job')['refresh_expected'], 2)
+        self.assertEqual([row['id'] for row in store.catalog()], ['job'])
+        self.assertEqual(store.files('job')[0]['file_id'], 'saved')
+
+    async def test_source_growth_requires_a_fresh_matching_manifest(self):
+        detail = NS(chat_id=101, id=6, raw_text='文档数：1', document=None, photo=None, buttons=[])
+        media = NS(chat_id=101, id=7, raw_text='', document=NS(id=200), photo=None, buttons=[])
+        self.bridge.store.update('job', 'complete', 1)
+        self.bridge.store.queue_source_refresh('job', 2)
+        self.job.update(expected=2, minimum_expected=2, refresh_source=True)
+        self.job['events'].put_nowait(detail)
+        self.job['events'].put_nowait(media)
+        self.bridge.client = NS(get_entity=AsyncMock(return_value=NS(id=101, bot=True)),
+                                get_messages=AsyncMock(return_value=[]), send_message=AsyncMock(),
+                                disconnect=AsyncMock())
+        self.bridge.transfer_media = AsyncMock()
+        with self.assertRaisesRegex(RuntimeError, '来源未确认更新后的媒体清单'):
+            await self.bridge.collect('https://t.me/epan?start=s_abc', self.job)
+        self.bridge.transfer_media.assert_not_awaited()
+
     async def test_restore_only_eligible_owned_jobs_and_deduplicates_requests(self):
         self.bridge.transfer_mode = 'download_upload'
         self.bridge.store.update('job', 'running', 63)
