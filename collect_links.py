@@ -126,26 +126,25 @@ async def operate(args, config, root, ledger):
                     control.write(root, {'at': time.time(), 'pid': os.getpid()}, name='collector-heartbeat.json')
                     rows, jobs = existing_jobs(root / 'index.sqlite3', owner, allowed)
                     ledger.reconcile(jobs)
+                    delay = 10
                     if safe_to_dispatch(root / 'index.sqlite3', rows, root):
-                        if not control.paused(root,'collector') and ledger.head_due(args.source):
-                            async with source_lease(root / 'source-control.lock'):
-                                if await catalog.scan_head(ledger):
-                                    await catalog.revisit(ledger)
-                            _, jobs = existing_jobs(root / 'index.sqlite3', owner, allowed)
-                            ledger.reconcile(jobs)
-                        ready = ledger.db.execute("SELECT 1 FROM items WHERE state='ready' LIMIT 1").fetchone()
-                        if not ready and not control.paused(root,'collector'):
-                            async with source_lease(root / 'source-control.lock'):
-                                await catalog.scan_page(ledger)
-                            _, jobs = existing_jobs(root / 'index.sqlite3', owner, allowed)
-                            ledger.reconcile(jobs)
+                        try:
+                            if not control.paused(root,'collector') and ledger.head_due(args.source):
+                                async with source_lease(root / 'source-control.lock'):
+                                    if await catalog.scan_head(ledger, max_pages=1):
+                                        await catalog.revisit(ledger)
+                                _, jobs = existing_jobs(root / 'index.sqlite3', owner, allowed)
+                                ledger.reconcile(jobs)
+                            if not ledger.next() and not control.paused(root,'collector'):
+                                async with source_lease(root / 'source-control.lock'):
+                                    await catalog.scan_page(ledger)
+                        except MenuChangedError:
+                            print('来源菜单未确认，保留采集断点，60 秒后再检查。', flush=True)
+                            delay = 60
+                        # Already verified shares remain usable if the next menu click fails.
                         await dispatch(client, target, ledger, root / 'index.sqlite3', owner, allowed, root)
-                    await asyncio.sleep(10)
+                    await asyncio.sleep(delay)
                 except Exception as error:
-                    if isinstance(error, MenuChangedError):
-                        print('来源菜单未确认，保留采集断点，60 秒后再检查。', flush=True)
-                        await asyncio.sleep(60)
-                        continue
                     if type(error).__name__ == 'FloodWaitError':
                         delay = max(1, int(error.seconds))
                         print(f'来源要求等待 {delay} 秒；保存进度后等待。', flush=True)

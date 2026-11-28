@@ -48,16 +48,19 @@ class Catalog:
         self.client, self.source, self.allowed = client, source, allowed
         self.delay, self.timeout = delay, timeout
         self.should_pause = should_pause
+        self.refresh_panel = False
 
     async def find_panel(self):
-        for message in await self.client.get_messages(self.source, limit=200):
-            if self.is_panel(message):
-                return message
+        if not self.refresh_panel:
+            for message in await self.client.get_messages(self.source, limit=200):
+                if self.is_panel(message):
+                    return message
         sent = await self.client.send_message(self.source, '/start')
         deadline = time.monotonic() + self.timeout
         while time.monotonic() < deadline:
             for message in await self.client.get_messages(self.source, limit=5):
                 if message.id > sent.id and self.is_panel(message):
+                    self.refresh_panel = False
                     return message
             await asyncio.sleep(0.5)
         raise MenuChangedError('来源未回复可识别的文件夹目录入口。')
@@ -74,6 +77,9 @@ class Catalog:
             # Answer timeout can still mean an edit succeeded; poll before retrying anything.
             await asyncio.wait_for(message.click(data=data), timeout=self.timeout)
         except Exception as error:
+            if type(error).__name__ == 'DataInvalidError':
+                self.refresh_panel = True
+                raise MenuChangedError('来源目录按钮已失效，需要重新打开目录。') from error
             if type(error).__name__ not in {'BotResponseTimeoutError', 'TimeoutError'}:
                 raise
         deadline = time.monotonic() + self.timeout
@@ -84,6 +90,7 @@ class Catalog:
                 if current and (current.id == message.id or current.id > baseline) and predicate(current):
                     return current
             await asyncio.sleep(0.5)
+        self.refresh_panel = True
         raise MenuChangedError('目录点击后未确认预期页面；已保存进度，停止本轮。')
 
     async def page(self, wanted):

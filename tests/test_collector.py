@@ -91,6 +91,19 @@ class StateTests(unittest.TestCase):
 
 
 class MenuTests(unittest.IsolatedAsyncioTestCase):
+    async def test_invalid_callback_discards_the_stale_panel(self):
+        from telethon.errors import DataInvalidError
+        fresh = NS(id=12, raw_text='目录入口',
+                   buttons=[[NS(text='文件夹列表', data=b'list')]])
+        panel = NS(id=9, click=AsyncMock(side_effect=DataInvalidError(request=None)))
+        client = NS(send_message=AsyncMock(return_value=NS(id=11)),
+                    get_messages=AsyncMock(side_effect=[[panel], [fresh]]))
+        catalog = Catalog(client, 'source', {'epan'}, delay=0)
+        with self.assertRaises(MenuChangedError):
+            await catalog.click(panel, b'expired', lambda _: True)
+        self.assertIs(await catalog.find_panel(), fresh)
+        client.send_message.assert_awaited_once_with('source', '/start')
+
     async def test_collector_reopens_menu_after_media_pushes_it_out_of_history(self):
         old = NS(id=9, raw_text='文件夹列表', buttons=[[NS(text='文件夹列表', data=b'list')]])
         fresh = NS(id=11, raw_text='文件夹列表', buttons=old.buttons)
