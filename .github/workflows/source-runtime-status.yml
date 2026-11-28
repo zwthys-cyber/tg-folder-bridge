@@ -17,11 +17,19 @@ jobs:
       - name: Read business state only
         run: |
           gh codespace ssh -c "$RUNTIME_NAME" -- 'cd /workspaces/tg-folder-bridge && .venv/bin/python -' <<'PY'
-          import json, sqlite3, subprocess, time
+          import json, re, sqlite3, subprocess, time
           from pathlib import Path
           root=Path('/workspaces/.tg-runtime/bridge/data')
           config=root.parents[1]/'supervisord.conf'
           print(subprocess.run(['.venv/bin/supervisorctl','-c',str(config),'status','souga','collector'],capture_output=True,text=True).stdout)
+          print('deployed_commit',subprocess.check_output(['git','rev-parse','--short','HEAD'],text=True).strip())
+          for program in ('collector','souga'):
+              recent=[]
+              for stream in ('stdout','stderr'):
+                  output=subprocess.run(['.venv/bin/supervisorctl','-c',str(config),'tail',program,stream],
+                                        capture_output=True,text=True,timeout=8).stdout
+                  recent.extend(re.findall(r'^(?:[a-zA-Z_][\w.]*\.)?([a-zA-Z_][\w]*(?:Error|Exception)):',output,re.M))
+              print(program,'recent_exception_types',recent[-8:])
           for filename in ['index.sqlite3','collector.sqlite3']:
               db=sqlite3.connect((root/filename).as_uri()+'?mode=ro',uri=True)
               if filename=='index.sqlite3':
