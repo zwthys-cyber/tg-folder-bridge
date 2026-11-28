@@ -56,15 +56,20 @@ class Ledger:
         columns = {r[1] for r in self.db.execute('PRAGMA table_info(items)')}
         if 'priority' not in columns:
             self.db.execute('ALTER TABLE items ADD COLUMN priority INTEGER DEFAULT 0')
-            self.db.commit()
+        for column in ('observed_count', 'refresh_count'):
+            if column not in columns:
+                self.db.execute(f'ALTER TABLE items ADD COLUMN {column} INTEGER')
+        self.db.commit()
 
-    def add(self, source, key, title, link):
+    def add(self, source, key, title, link, observed_count=None):
         with self.db:
             suffix = re.search(r'(\d+)\s*$', title)
             priority = int(suffix[1]) if suffix else 0
             added = self.db.execute('INSERT OR IGNORE INTO items(source,item_key,title,link,priority) VALUES(?,?,?,?,?)',
                             (source, key, title, link, priority)).rowcount > 0
             self.db.execute('INSERT OR IGNORE INTO discoveries VALUES(?,?)', (source, key))
+            if observed_count is not None:
+                self.db.execute('UPDATE items SET observed_count=? WHERE link=?', (observed_count, link))
             return added
 
     def seen(self, source, key):
@@ -79,11 +84,12 @@ class Ledger:
             self.db.execute('INSERT OR REPLACE INTO cursor VALUES(?,?,?,?)',
                             (source, min(page + 1, total), total, int(page == total)))
 
-    def set_state(self, row, state, job=None, attempt=False):
+    def set_state(self, row, state, job=None, attempt=False, refresh_count=None):
         with self.db:
-            self.db.execute('UPDATE items SET state=?, job=COALESCE(?,job), attempts=attempts+? '
+            self.db.execute('UPDATE items SET state=?, job=COALESCE(?,job), attempts=attempts+?, '
+                            'refresh_count=COALESCE(?,refresh_count) '
                             'WHERE source=? AND item_key=?',
-                            (state, job, int(attempt), row['source'], row['item_key']))
+                            (state, job, int(attempt), refresh_count, row['source'], row['item_key']))
 
     def reconcile(self, jobs):
         for row in self.db.execute('SELECT * FROM items').fetchall():
@@ -94,6 +100,12 @@ class Ledger:
             if job['state']=='cancelled':
                 self.set_state(row,'ignored',job['id'])
                 continue
+            if row['state'] == 'dispatching' and row['refresh_count'] is not None:
+                if job['state'] == 'complete' and (job.get('expected') or 0) < row['refresh_count']:
+                    continue
+                if job.get('refresh_expected') == row['refresh_count'] and job['state'] not in ACTIVE:
+                    self.set_state(row, 'review', job['id'])
+                    continue
             state = 'complete' if job['state'] == 'complete' else (
                 'submitted' if job['state'] in ACTIVE else (
                     'ready' if row['attempts'] == 0 else 'review'))
@@ -104,6 +116,19 @@ class Ledger:
     def next(self):
         row = self.db.execute("SELECT * FROM items WHERE state='ready' ORDER BY priority DESC,rowid LIMIT 1").fetchone()
         return dict(row) if row else None
+
+    def pending(self):
+        return self.db.execute("SELECT * FROM items WHERE state='ready' OR "
+                               "(state='complete' AND observed_count>coalesce(refresh_count,0)) "
+                               "ORDER BY priority DESC,rowid").fetchall()
+
+    @staticmethod
+    def refresh_target(item, job):
+        if not job or job['state'] != 'complete' or not job.get('expected'):
+            return None
+        count = item['observed_count']
+        if count is not None and max(job['expected'], item['refresh_count'] or 0) < count <= 5000:
+            return count
 
     def begin_head(self, source):
         with self.db:
@@ -141,6 +166,15 @@ class Ledger:
             self.db.executemany('DELETE FROM settings WHERE key=?',
                 [('head-base:' + source,), ('head-page:' + source,), ('head-clean:' + source,)])
             self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)', ('head:' + source, time.time()))
+
+    def revisit_page(self, source, total):
+        row = self.db.execute('SELECT value FROM settings WHERE key=?', ('revisit:' + source,)).fetchone()
+        return int(row[0]) if row and 3 <= row[0] <= total else 3
+
+    def checked_revisit(self, source, page, total):
+        with self.db:
+            self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',
+                            ('revisit:' + source, page + 1 if page < total else 3))
 
     def summary(self):
         return dict(self.db.execute('SELECT state,count(*) FROM items GROUP BY state'))

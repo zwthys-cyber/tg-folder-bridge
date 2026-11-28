@@ -60,24 +60,38 @@ async def dispatch(client, target, ledger, index, owner, allowed, root):
     # Unknown command delivery must be reconciled, never blindly repeated.
     if ledger.db.execute("SELECT 1 FROM items WHERE state='dispatching' LIMIT 1").fetchone():
         return False
-    for item in ledger.db.execute("SELECT * FROM items WHERE state NOT IN ('complete','review','submitted','ignored') ORDER BY priority DESC,rowid").fetchall():
+    for item in ledger.pending():
         job = jobs.get(item['link'])
+        refresh = ledger.refresh_target(item, job)
         if job and job['state'] == 'complete':
-            ledger.set_state(item, 'complete', job['id'])
+            if refresh:
+                command = f"/resume {job['id']} refresh {refresh}"
+            else:
+                continue
+        elif item['state'] != 'ready':
             continue
-        if item['attempts'] >= 2:
+        elif item['attempts'] >= 2:
             ledger.set_state(item, 'review', job['id'] if job else None)
             continue
-        command = '/resume ' + job['id'] if job else '/fetch ' + item['link']
+        else:
+            command = '/resume ' + job['id'] if job else '/fetch ' + item['link']
         # Durable before network I/O. A crash here intentionally needs reconciliation.
-        ledger.set_state(item, 'dispatching', job['id'] if job else None, attempt=True)
+        ledger.set_state(item, 'dispatching', job['id'] if job else None, attempt=True, refresh_count=refresh)
         await client.send_message(target, command)
         # Wait for real job creation/state change; a sent command alone is not acceptance.
         for _ in range(30):
             await asyncio.sleep(1)
             _, current = existing_jobs(index, owner, allowed)
             accepted = current.get(item['link'])
-            if accepted and (not job or accepted['state'] in ACTIVE | {'complete'}):
+            if not accepted:
+                continue
+            if refresh:
+                confirmed = (accepted['id'] == job['id'] and
+                             (accepted.get('refresh_expected') == refresh or
+                              (accepted['state'] == 'complete' and (accepted.get('expected') or 0) >= refresh)))
+            else:
+                confirmed = not job or accepted['state'] in ACTIVE | {'complete'}
+            if confirmed:
                 ledger.set_state(item, 'submitted', accepted['id'])
                 print(f"已提交：{item['title']}，任务 {accepted['id']}", flush=True)
                 return True
@@ -115,7 +129,8 @@ async def operate(args, config, root, ledger):
                     if safe_to_dispatch(root / 'index.sqlite3', rows, root):
                         if not control.paused(root,'collector') and ledger.head_due(args.source):
                             async with source_lease(root / 'source-control.lock'):
-                                await catalog.scan_head(ledger)
+                                if await catalog.scan_head(ledger):
+                                    await catalog.revisit(ledger)
                             _, jobs = existing_jobs(root / 'index.sqlite3', owner, allowed)
                             ledger.reconcile(jobs)
                         ready = ledger.db.execute("SELECT 1 FROM items WHERE state='ready' LIMIT 1").fetchone()
