@@ -14,33 +14,6 @@ jobs:
       GH_TOKEN: ${{ secrets.CODESPACES_TOKEN }}
       RUNTIME_NAME: sougabot-runtime-q7j9q4w7wq64h46q5
     steps:
-      - name: Apply tested collector changes to the existing runtime
-        run: |
-          gh codespace ssh -c "$RUNTIME_NAME" -- 'cd /workspaces/tg-folder-bridge && .venv/bin/python -' <<'PY'
-          import sqlite3, subprocess
-          from contextlib import closing
-          from pathlib import Path
-          def git(*args):
-              return subprocess.check_output(['git',*args],text=True).strip()
-          previous='f39031e8f6af8f3d41cd4bb697b9ebe8d8ab7286'
-          expected='ebc628ebd851ba2516afa54d69581b07b77d3e89'
-          root=Path('/workspaces/.tg-runtime')
-          current=git('rev-parse','HEAD')
-          if current not in {previous,expected}:
-              raise SystemExit('Unexpected deployed revision')
-          for args in (('diff','--quiet'),('diff','--cached','--quiet')):
-              subprocess.run(['git',*args],check=True)
-          git('fetch','origin','main')
-          if git('rev-parse','FETCH_HEAD')!=expected:
-              raise SystemExit('Main has moved since testing')
-          with closing(sqlite3.connect((root/'bridge/data/collector.sqlite3').as_uri()+'?mode=ro',uri=True)) as db:
-              if db.execute("SELECT 1 FROM items WHERE state='dispatching' LIMIT 1").fetchone():
-                  raise SystemExit('Wait for the collector to confirm its current submission')
-          git('merge','--ff-only',expected)
-          control=['.venv/bin/supervisorctl','-c',str(root/'supervisord.conf')]
-          subprocess.run(control+['restart','collector'],check=True)
-          print('Collector deployed revision',git('rev-parse','--short','HEAD'))
-          PY
       - name: Read business state only
         run: |
           gh codespace ssh -c "$RUNTIME_NAME" -- 'cd /workspaces/tg-folder-bridge && .venv/bin/python -' <<'PY'
