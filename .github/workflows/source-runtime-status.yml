@@ -35,6 +35,26 @@ jobs:
               if filename=='index.sqlite3':
                   print('jobs',db.execute('SELECT state,count(*) FROM jobs GROUP BY state').fetchall())
                   print('latest_jobs',db.execute('SELECT title,state,expected,(SELECT count(*) FROM files WHERE files.job=jobs.id) FROM jobs ORDER BY rowid DESC LIMIT 5').fetchall())
+                  for job, expected, state in db.execute("SELECT id,expected,state FROM jobs WHERE title=?",('反差女主1075',)):
+                      files = {(chat,message): key for chat,message,key in db.execute(
+                          "SELECT source_chat,source_message,media_key FROM files WHERE job=?",(job,))}
+                      aliases = {(chat,message): key for chat,message,key,canonical_chat,canonical_message in db.execute(
+                          "SELECT source_chat,source_message,media_key,canonical_chat,canonical_message FROM file_aliases WHERE job=?",
+                          (job,)) if (canonical_chat,canonical_message) in files}
+                      row = db.execute("SELECT payload,media_keys FROM source_plans WHERE job=?",(job,)).fetchone()
+                      if not row or not row[1]:
+                          print('1075 source coverage',{'state':state,'expected':expected,'saved':len(files),'valid_aliases':len(aliases),'manifest':'unavailable'})
+                          continue
+                      sources, keys = map(json.loads,row)
+                      media_keys = set(files.values()) | set(aliases.values())
+                      counts = dict(saved_sources=0, merged_aliases=0, same_telegram_media=0, missing=0)
+                      for source,key in zip(sources,keys):
+                          source = tuple(source)
+                          match = ('saved_sources' if source in files else 'merged_aliases' if source in aliases else
+                                   'same_telegram_media' if key and key in media_keys else 'missing')
+                          counts[match] += 1
+                      print('1075 source coverage',dict(counts,state=state,expected=expected,saved=len(files),
+                                                       source_entries=len(sources),manifest_keys=len(keys)))
               else:
                   print('links',db.execute('SELECT state,count(*) FROM items GROUP BY state').fetchall())
                   print('cursor',db.execute('SELECT * FROM cursor').fetchall())
